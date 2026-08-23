@@ -1,0 +1,7 @@
+module Pipeline.Config;
+
+define STAGE_LED_WIDTH   = 3840;
+define STAGE_LED_HEIGHT  = 2160;
+define GENLOCK_REFRESH   = 59.94;
+define ACES_PROFILE      = 1;
+define DMX_UNIVERSE_MAX  = 4;
