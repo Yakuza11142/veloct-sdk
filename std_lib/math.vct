@@ -1,0 +1,13 @@
+module Core.Math;
+
+public struct Vector3 {
+    x: f32,
+    y: f32,
+    z: f32
+}
+
+public system VectorOperations {
+    public fn dot_product(a: Vector3, b: Vector3) -> f32 {
+        return (a.x * b.x) + (a.y * b.y) + (a.z * b.z);
+    }
+}
