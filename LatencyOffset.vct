@@ -1,0 +1,11 @@
+module Tracking.Latency;
+
+struct TrackingHistory {
+    frames: [vec3; 16],
+    write_idx: u8
+}
+
+public fn get_delayed_transform(history: TrackingHistory, latency_frames: u8) -> vec3 {
+    let read_idx = (history.write_idx + 16 - latency_frames) % 16;
+    return history.frames[read_idx];
+}
