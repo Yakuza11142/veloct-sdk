@@ -1,0 +1,21 @@
+module Commerce.Assets;
+
+struct MachineAssetHealth {
+    asset_id: u64,
+    operating_hours: f32,
+    vibration_frequency_hz: f32,
+    temperature_c: f32,
+    failure_risk_score: f32
+}
+
+public system PredictiveMaintenanceEngine {
+    // Evaluates stress indicators to output asset failure risk score
+    public fn evaluate_failure_risk(mut asset: mut MachineAssetHealth) -> f32 {
+        let temp_factor = math_max(0.0, (asset.temperature_c - 70.0) / 30.0);
+        let vib_factor  = math_max(0.0, (asset.vibration_frequency_hz - 120.0) / 80.0);
+        let hour_factor = asset.operating_hours / 10000.0;
+
+        asset.failure_risk_score = math_clamp((temp_factor * 0.4) + (vib_factor * 0.4) + (hour_factor * 0.2), 0.0, 1.0);
+        return asset.failure_risk_score;
+    }
+}
