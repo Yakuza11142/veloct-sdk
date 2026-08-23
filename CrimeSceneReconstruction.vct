@@ -1,0 +1,27 @@
+module Forensics.Reconstruction;
+
+struct EvidenceMarker {
+    marker_id: u64,
+    position: vec3,
+    category_type: u16, // 1: Shell Casing, 2: Impact Point, 3: DNA Sample
+    uncertainty_radius_mm: f32
+}
+
+public system SceneReconstructionEngine {
+    // Calculates line-of-sight visibility ray between observer position and evidence marker
+    public fn verify_line_of_sight(observer_pos: vec3, marker_pos: vec3, spatial_mesh_depth: [f32; 1024]) -> bool {
+        let ray_dir = vec3_normalize(marker_pos - observer_pos);
+        let dist = vec3_distance(observer_pos, marker_pos);
+        
+        let mut step: f32 = 0.1;
+        while step < dist {
+            let sample_pt = observer_pos + ray_dir * step;
+            let mesh_idx = math_clamp((sample_pt.x * 32.0 + sample_pt.z) as u64, 0, 1023);
+            if spatial_mesh_depth[mesh_idx] < sample_pt.y {
+                return false; // Occluded by scene geometry
+            }
+            step += 0.5;
+        }
+        return true;
+    }
+}
