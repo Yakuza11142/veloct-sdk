@@ -1,0 +1,136 @@
+sdk_manifest:
+  name: "Veloct Spatial Engine SDK"
+  identifier: "com.veloct.sdk"
+  version: "1.0.0"
+  edition: "2026"
+  license: "Business Source License 1.1"
+  copyright: "Copyright 2026 Mind Spark"
+  license_terms:
+    usage: "Free for personal use, education, and open source projects. Commercial use requires a paid license from Mind Spark."
+    contact: "mindsparkceo@gmail.com"
+  repository: "https://github.com/Yakuza11142/VeloctSDK"
+
+target_architectures:
+  desktop:
+    - target: "x86_64-pc-windows-msvc"
+      output_type: "dynamic_lib" # .dll
+    - target: "aarch64-apple-darwin"
+      output_type: "framework"   # .framework
+    - target: "x86_64-unknown-linux-gnu"
+      output_type: "shared_lib"  # .so
+  mobile:
+    - target: "aarch64-linux-android"
+      output_type: "shared_lib"  # .so
+    - target: "aarch64-apple-ios"
+      output_type: "static_lib"  # .a
+  web:
+    - target: "wasm32-unknown-emscripten"
+      output_type: "wasm"        # .wasm / .js bindings
+
+module_compilation_order:
+  - domain: "Domain_01_CoreSpatialEngine"
+    files:
+      - "src/modules/d1/SpatialNodeGraph.vct"
+      - "src/modules/d1/CameraAndProjection.vct"
+      - "src/modules/d1/LightAndShadowPass.vct"
+      - "src/modules/d1/RayTracingCore.vct"
+      - "src/modules/d1/MaterialAndShaderRegistry.vct"
+      - "src/modules/d1/SpatialConfigAndData.vct"
+  - domain: "Domain_02_SimulationAndPhysics"
+    files:
+      - "src/modules/d2/RigidBodyDynamics.vct"
+      - "src/modules/d2/FluidAndAtmosphere.vct"
+      - "src/modules/d2/ClothAndSoftBody.vct"
+      - "src/modules/d2/ParticleSystemCore.vct"
+      - "src/modules/d2/AcousticAudioPhysics.vct"
+      - "src/modules/d2/PhysicsConfigAndData.vct"
+  - domain: "Domain_03_AerospaceAndRobotics"
+    files:
+      - "src/modules/d3/AerodynamicsAndFlight.vct"
+      - "src/modules/d3/OrbitalMechanics.vct"
+      - "src/modules/d3/RoboticKinematics.vct"
+      - "src/modules/d3/AvionicsAndTelemetry.vct"
+      - "src/modules/d3/SensorSimulation.vct"
+      - "src/modules/d3/AerospaceConfigAndData.vct"
+  - domain: "Domain_04_AutomotiveAndMobility"
+    files:
+      - "src/modules/d4/VehicleDynamics.vct"
+      - "src/modules/d4/LiDARAndRadarSimulation.vct"
+      - "src/modules/d4/TrafficAndAgentBehavior.vct"
+      - "src/modules/d4/BatteryAndThermalManagement.vct"
+      - "src/modules/d4/TerrainAndRoadMesh.vct"
+      - "src/modules/d4/AutomotiveConfigAndData.vct"
+  - domain: "Domain_05_AEC"
+    files:
+      - "src/modules/d5/BIMAndStructuralAnalysis.vct"
+      - "src/modules/d5/GeotechnicalAndSoilPhysics.vct"
+      - "src/modules/d5/HVACAndAirflowSimulation.vct"
+      - "src/modules/d5/GISAndPhotogrammetry.vct"
+      - "src/modules/d5/AcousticsAndLightingAnalysis.vct"
+      - "src/modules/d5/AECConfigAndData.vct"
+  - domain: "Domain_06_MediaAndVirtualProduction"
+    files:
+      - "src/modules/d6/LEDWallStageSync.vct"
+      - "src/modules/d6/MotionCaptureAndRigging.vct"
+      - "src/modules/d6/VirtualCameraAndLens.vct"
+      - "src/modules/d6/ColorGradingAndACEO.vct"
+      - "src/modules/d6/SpatialAudioEncoding.vct"
+      - "src/modules/d6/MediaConfigAndData.vct"
+  - domain: "Domain_07_HealthcareAndMedical"
+    files:
+      - "src/modules/d7/VolumetricMedicalRendering.vct"
+      - "src/modules/d7/SurgicalPhysicsAndSoftTissue.vct"
+      - "src/modules/d7/BiomechanicalKinematics.vct"
+      - "src/modules/d7/GenomicAndMolecularViz.vct"
+      - "src/modules/d7/RadiationDoseAndBeamFX.vct"
+      - "src/modules/d7/MedicalConfigAndData.vct"
+  - domain: "Domain_08_ScientificResearch"
+    files:
+      - "src/modules/d8/QuantumCircuitVisualizer.vct"
+      - "src/modules/d8/PlasmaMHDPhysics.vct"
+      - "src/modules/d8/MeteorologyFluidSolver.vct"
+      - "src/modules/d8/EMWavePropagation.vct"
+      - "src/modules/d8/HighEnergyParticlePhysics.vct"
+      - "src/modules/d8/ScientificConfigAndData.vct"
+  - domain: "Domain_09_ForensicsAndSecurity"
+    files:
+      - "src/modules/d9/CrimeSceneReconstruction.vct"
+      - "src/modules/d9/BallisticTrajectorySolver.vct"
+      - "src/modules/d9/PerimeterSecurityCones.vct"
+      - "src/modules/d9/ThermalSignatureTracking.vct"
+      - "src/modules/d9/CrowdSafetyEvacuation.vct"
+      - "src/modules/d9/ForensicsConfigAndData.vct"
+  - domain: "Domain_10_EnterpriseAndAgritech"
+    files:
+      - "src/modules/d10/AgritechCanopyAndSoil.vct"
+      - "src/modules/d10/SportsTelemetryAndTracking.vct"
+      - "src/modules/d10/RetailSpatialAnalytics.vct"
+      - "src/modules/d10/CasinoAndGamingState.vct"
+      - "src/modules/d10/AssetLifecycleAndMaintenance.vct"
+      - "src/modules/d10/AppliedTechConfigAndData.vct"
+
+gpu_transpilation:
+  enabled: true
+  spirv_target: "vulkan_1.3"
+  metal_target: "air_2.4"
+  hlsl_target: "shader_model_6_6"
+  optimization: "O3"
+
+sdk_bindings_generator:
+  languages:
+    - name: "rust"
+      output_dir: "bindings/rust"
+    - name: "c_cpp"
+      output_header: "include/veloct_sdk.h"
+    - name: "dart_flutter"
+      output_dir: "bindings/dart"
+    - name: "python"
+      output_dir: "bindings/python"
+
+package_output:
+  directory: "dist/sdk"
+  artifacts:
+    - name: "veloct-sdk-core.bin"
+    - name: "veloct-sdk-headers.zip"
+    - name: "veloct-sdk-shaders.spv"
+    - name: "LICENSE"
