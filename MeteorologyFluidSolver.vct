@@ -1,0 +1,15 @@
+module Scientific.Meteorology;
+
+public system AtmosphereEngine {
+    // Calculates Earth rotational Coriolis acceleration vector on moving wind mass
+    public fn compute_coriolis_acceleration(wind_velocity: vec3, latitude_rad: f32, angular_velocity: f32) -> vec3 {
+        let omega = vec3(0.0, angular_velocity * math_sin(latitude_rad), angular_velocity * math_cos(latitude_rad));
+        return vec3_cross(wind_velocity, omega) * -2.0;
+    }
+
+    // Solves geostrophic wind speed balance between pressure gradient and Coriolis forces
+    public fn compute_geostrophic_wind(pressure_gradient: vec3, air_density: f32, coriolis_param: f32) -> vec3 {
+        let factor = 1.0 / (air_density * coriolis_param);
+        return vec3(-pressure_gradient.z * factor, 0.0, pressure_gradient.x * factor);
+    }
+}
