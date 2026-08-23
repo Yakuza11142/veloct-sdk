@@ -1,0 +1,33 @@
+module Robotics.Kinematics;
+
+struct JointState {
+    angles: [f32; 6],
+    limits_min: [f32; 6],
+    limits_max: [f32; 6]
+}
+
+public system KinematicsSolver {
+    // Solves end-effector 3D position from 6 joint angles (Forward Kinematics)
+    public fn compute_forward_kinematics(joints: JointState) -> mat4 {
+        let mut transform = mat4_identity();
+        let mut i: u64 = 0;
+        while i < 6 {
+            let angle = math_clamp(joints.angles[i], joints.limits_min[i], joints.limits_max[i]);
+            let rot_z = mat4_rotation_z(angle);
+            let trans_x = mat4_translation(vec3(0.5, 0.0, 0.0));
+            transform = mat4_mul(transform, mat4_mul(rot_z, trans_x));
+            i += 1;
+        }
+        return transform;
+    }
+
+    // Single-step Jacobian Transpose Inverse Kinematics iteration
+    public fn compute_ik_step(mut joints: mut JointState, target_pos: vec3, current_pos: vec3) {
+        let error = target_pos - current_pos;
+        let mut i: u64 = 0;
+        while i < 6 {
+            joints.angles[i] += error.x * 0.01; // Step angle towards target
+            i += 1;
+        }
+    }
+}
