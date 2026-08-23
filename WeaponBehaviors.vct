@@ -1,0 +1,16 @@
+module Combat.Weapons;
+
+struct Weapon {
+    ammo_in_clip: u16,
+    max_clip: u16,
+    fire_rate: f32,
+    recoil_force: f32
+}
+
+public fn fire_weapon(mut weapon: Weapon) -> bool {
+    if weapon.ammo_in_clip > 0 {
+        weapon.ammo_in_clip -= 1;
+        return true;
+    }
+    return false;
+}
