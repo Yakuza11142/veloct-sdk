@@ -1,0 +1,31 @@
+vct_project:
+  name: "VeloctCompilerToolchain"
+  version: "1.0.0"
+  edition: "2026"
+  description: "Native compiler toolchain for Veloct (.vct) high-performance spatial and GPU compute code."
+
+compiler_targets:
+  bytecode:
+    extension: ".vctb"
+    optimization_level: "O3"
+  gpu_kernels:
+    backends:
+      - "HLSL"
+      - "MSL"
+      - "SPIR-V"
+    workgroup_size: [64, 1, 1]
+  native_binaries:
+    arch: ["x86_64", "aarch64"]
+    platforms: ["windows", "linux", "macos"]
+
+dependencies:
+  std_library: "core_vct_std"
+  gpu_runtime: "veloct_gpu_runtime_v1"
+
+build_pipeline:
+  stages:
+    - lexer
+    - parser
+    - type_checker
+    - bytecode_emitter
+    - spirv_codegen
