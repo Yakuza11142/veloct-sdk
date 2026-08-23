@@ -1,0 +1,13 @@
+module Economy.Crafting;
+
+struct Recipe {
+    material_a_id: u32,
+    material_a_qty: u16,
+    material_b_id: u32,
+    material_b_qty: u16,
+    result_item_id: u32
+}
+
+public fn craft_item(recipe: Recipe, mat_a_qty: u16, mat_b_qty: u16) -> bool {
+    return mat_a_qty >= recipe.material_a_qty && mat_b_qty >= recipe.material_b_qty;
+}
