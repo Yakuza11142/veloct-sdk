@@ -1,0 +1,8 @@
+module Graphics.TerrainShader;
+
+[GPUCompute]
+public kernel fn render_terrain_pass(mut color_buffer: [vec4], depth_buffer: [f32], width: u32) {
+    let idx = dispatch_thread_id_x();
+    let norm_z = depth_buffer[idx] / 1000.0;
+    color_buffer[idx] = vec4(0.2 * norm_z, 0.6 * norm_z, 0.1 * norm_z, 1.0);
+}
