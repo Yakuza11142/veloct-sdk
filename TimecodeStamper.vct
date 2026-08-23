@@ -1,0 +1,16 @@
+module Pipeline.Timecode;
+
+struct SMPTETimecode {
+    hours: u8,
+    minutes: u8,
+    seconds: u8,
+    frames: u8
+}
+
+public fn convert_frame_to_smpte(total_frames: u64, fps: u8) -> SMPTETimecode {
+    let f = (total_frames % (fps as u64)) as u8;
+    let s = ((total_frames / (fps as u64)) % 60) as u8;
+    let m = ((total_frames / ((fps as u64) * 60)) % 60) as u8;
+    let h = (total_frames / ((fps as u64) * 3600)) as u8;
+    return SMPTETimecode { hours: h, minutes: m, seconds: s, frames: f };
+}
