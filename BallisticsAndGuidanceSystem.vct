@@ -1,0 +1,22 @@
+module Aerospace.Guidance;
+
+struct TargetInterception {
+    interceptor_pos: vec3,
+    interceptor_vel: vec3,
+    target_pos: vec3,
+    target_vel: vec3,
+    nav_constant: f32 // ProNav gain constant (typically 3.0 to 5.0)
+}
+
+public system ProportionalNavigation {
+    // Solves True Proportional Navigation (TPN) guidance acceleration vector
+    public fn compute_pronav_acceleration(data: TargetInterception) -> vec3 {
+        let relative_pos = data.target_pos - data.interceptor_pos;
+        let relative_vel = data.target_vel - data.interceptor_vel;
+        
+        let los_rate = vec3_cross(relative_pos, relative_vel) / vec3_dot(relative_pos, relative_pos);
+        let closing_velocity = vec3_length(relative_vel);
+        
+        return vec3_cross(data.interceptor_vel, los_rate) * (data.nav_constant * closing_velocity);
+    }
+}
