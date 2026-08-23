@@ -1,0 +1,11 @@
+module Broadcast.Overlays;
+
+struct GraphicOverlay {
+    position: vec2,
+    scale: vec2,
+    alpha: f32
+}
+
+public fn animate_in(mut overlay: GraphicOverlay, dt: f32) {
+    overlay.alpha = math_min(1.0, overlay.alpha + 2.0 * dt);
+}
