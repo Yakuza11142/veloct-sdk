@@ -1,0 +1,37 @@
+module Medical.VolumeRendering;
+
+struct TransferFunctionSample {
+    hounsfield_val: i16, // HU scale (-1000 Air, 0 Water, +1000 Bone)
+    tissue_color: vec4
+}
+
+public system VolumeRaycaster {
+    // Converts raw Hounsfield Unit density values into RGBA tissue colors
+    public fn sample_transfer_function(hu_value: i16) -> vec4 {
+        if hu_value < -200 { return vec4(0.0, 0.0, 0.0, 0.0); }       // Air / Void
+        if hu_value < 100  { return vec4(0.8, 0.2, 0.2, 0.15); }      // Soft Tissue / Blood
+        if hu_value < 300  { return vec4(0.9, 0.6, 0.4, 0.45); }      // Muscle / Fat
+        return vec4(0.95, 0.95, 0.90, 0.95);                          // Dense Bone
+    }
+
+    // GPU Ray-Marching step through 3D DICOM voxel grid
+    [GPUCompute]
+    public kernel fn march_dicom_volume(ray_origin: vec3, ray_dir: vec3, voxel_grid: [i16; 4096], mut out_color: mut vec4) {
+        let mut accum_color = vec4(0.0, 0.0, 0.0, 0.0);
+        let mut step_pos = ray_origin;
+        let mut i: u64 = 0;
+        
+        while i < 64 {
+            let sample_idx = math_clamp((step_pos.x + step_pos.y * 16.0 + step_pos.z * 256.0) as u64, 0, 4095);
+            let hu = voxel_grid[sample_idx];
+            let sample_color = sample_transfer_function(hu);
+            
+            accum_color += sample_color * (1.0 - accum_color.a);
+            if accum_color.a >= 0.98 { break; }
+            
+            step_pos += ray_dir * 0.05;
+            i += 1;
+        }
+        out_color = accum_color;
+    }
+}
