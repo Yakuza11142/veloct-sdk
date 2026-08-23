@@ -1,0 +1,13 @@
+module Aerospace.Sonar;
+
+public system UnderwaterAcoustics {
+    // Calculates sound speed profile in seawater based on depth, temperature, and salinity
+    public fn calculate_seawater_sound_speed(depth_m: f32, temp_c: f32, salinity_ppt: f32) -> f32 {
+        return 1449.2 + (4.6 * temp_c) - (0.055 * temp_c * temp_c) + (1.34 * (salinity_ppt - 35.0)) + (0.016 * depth_m);
+    }
+
+    // Thermocline refraction angle adjustment
+    public fn compute_ray_refraction(incident_angle: f32, c1: f32, c2: f32) -> f32 {
+        return math_asin((c2 / c1) * math_sin(incident_angle));
+    }
+}
