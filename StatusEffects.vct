@@ -1,0 +1,18 @@
+module Gameplay.StatusEffects;
+
+struct Effect {
+    effect_type: u8, // 1: Burn, 2: Poison, 3: Freeze
+    duration: f32,
+    tick_damage: f32
+}
+
+public fn process_effects(mut effects: [Effect; 8], mut health: f32, dt: f32) {
+    let mut i: u64 = 0;
+    while i < 8 {
+        if effects[i].duration > 0.0 {
+            health -= effects[i].tick_damage * dt;
+            effects[i].duration -= dt;
+        }
+        i += 1;
+    }
+}
