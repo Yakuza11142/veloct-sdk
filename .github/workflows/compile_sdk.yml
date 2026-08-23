@@ -15,42 +15,28 @@ permissions:
 env:
   SDK_NAME: "Veloct Spatial Engine SDK"
   SDK_VERSION: "1.0.0"
-  LICENSE_NAME: "Business Source License 1.1"
-  COPYRIGHT_HOLDER: "Mind Spark"
-  SUPPORT_EMAIL: "mindsparkceo@gmail.com"
 
 jobs:
   # ---------------------------------------------------------------------------
-  # 1. BUILD NATIVE ENGINE CORE BINARIES (MULTI-PLATFORM)
+  # 1. BUILD NATIVE ENGINE CORE BINARIES
   # ---------------------------------------------------------------------------
   build-native-binaries:
-    name: Build Native Dynamic/Static Libraries
+    name: Build Native Core Binaries
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-pc-windows-msvc
-          - x86_64-apple-darwin
-          - x86_64-unknown-linux-gnu
-          - aarch64-linux-android
-          - wasm32-unknown-emscripten
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            use_cross: "false"
           - target: x86_64-apple-darwin
             os: macos-latest
-            use_cross: "false"
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            use_cross: "false"
           - target: aarch64-linux-android
             os: ubuntu-latest
-            use_cross: "true"
           - target: wasm32-unknown-emscripten
             os: ubuntu-latest
-            use_cross: "false"
 
     steps:
       - name: Checkout Source Code
@@ -61,34 +47,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Install cargo-cross for target cross-compilation
-      - name: Install Cross-Compilation Tooling
-        if: matrix.use_cross == 'true'
-        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Build Core Engine Binary
+        run: cargo build --release || true
 
-      # Emscripten Setup for WASM
-      - name: Setup Emscripten (WASM)
-        if: matrix.target == 'wasm32-unknown-emscripten'
-        uses: mymindstorm/setup-emsdk@v12
-
-      # Validated Android NDK Setup
-      - name: Setup Android NDK
-        if: matrix.target == 'aarch64-linux-android'
-        uses: android-actions/setup-ndk@v3
-        with:
-          ndk-version: r25c
-
-      # Build Step (Standard Rust)
-      - name: Build Core Engine Binary (Standard)
-        if: matrix.use_cross == 'false'
-        run: cargo build --release --target ${{ matrix.target }} || cargo build --release || true
-
-      # Build Step (Cross Rust)
-      - name: Build Core Engine Binary (Cross)
-        if: matrix.use_cross == 'true'
-        run: cross build --release --target ${{ matrix.target }} || cargo build --release || true
-
-      # Stage Output Libraries
       - name: Stage Platform Binary Artifacts
         shell: bash
         run: |
@@ -103,7 +64,7 @@ jobs:
           path: dist/bin/${{ matrix.target }}
 
   # ---------------------------------------------------------------------------
-  # 2. TRANSPILE GPU COMPUTE KERNELS (.vct -> SPIR-V / Metal / HLSL)
+  # 2. TRANSPILE GPU COMPUTE KERNELS
   # ---------------------------------------------------------------------------
   transpile-gpu-kernels:
     name: Transpile GPU Compute Shaders
@@ -115,12 +76,10 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Transpile .vct Shaders to SPIR-V, Metal, and HLSL
+      - name: Transpile Shaders
         run: |
           mkdir -p dist/shaders
           cargo run --bin vctc -- transpile --target vulkan1.3 --out dist/shaders/veloct_kernels.spv || true
-          cargo run --bin vctc -- transpile --target metal2.4 --out dist/shaders/veloct_kernels.metal || true
-          cargo run --bin vctc -- transpile --target hlsl6.6 --out dist/shaders/veloct_kernels.hlsl || true
           touch dist/shaders/.keep
 
       - name: Upload Shader Artifacts
@@ -133,7 +92,7 @@ jobs:
   # 3. GENERATE MULTI-LANGUAGE BINDINGS
   # ---------------------------------------------------------------------------
   generate-sdk-bindings:
-    name: Generate Language Bindings (C++, Rust, Dart, Python)
+    name: Generate Language Bindings
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Source Code
@@ -142,13 +101,10 @@ jobs:
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Generate Multi-Language API Interfaces
+      - name: Generate API Interfaces
         run: |
-          mkdir -p dist/bindings/c_cpp dist/bindings/rust dist/bindings/dart dist/bindings/python
-          cargo run --bin vctc -- generate-bindings --lang c --out dist/bindings/c_cpp/veloct_sdk.h || true
-          cargo run --bin vctc -- generate-bindings --lang rust --out dist/bindings/rust || true
-          cargo run --bin vctc -- generate-bindings --lang dart --out dist/bindings/dart || true
-          cargo run --bin vctc -- generate-bindings --lang python --out dist/bindings/python || true
+          mkdir -p dist/bindings
+          cargo run --bin vctc -- generate-bindings --lang c --out dist/bindings/veloct_sdk.h || true
           touch dist/bindings/.keep
 
       - name: Upload Language Bindings
@@ -158,7 +114,7 @@ jobs:
           path: dist/bindings
 
   # ---------------------------------------------------------------------------
-  # 4. BUNDLE COMPLETE SDK PACKAGE & INJECT CUSTOM BSL 1.1 LICENSE
+  # 4. BUNDLE COMPLETE SDK PACKAGE
   # ---------------------------------------------------------------------------
   bundle-and-release-sdk:
     name: Bundle & Package Release
@@ -168,36 +124,21 @@ jobs:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
-      - name: Create Bundle Directory Structure
+      - name: Create Bundle Directory
         run: |
-          mkdir -p veloct-spatial-sdk-v1.0.0/{bin,bindings,shaders,include}
+          mkdir -p veloct-spatial-sdk-v1.0.0
 
-      - name: Download All Native & Cross-Compiled Artifacts
+      - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
           path: fetched_artifacts
 
-      - name: Assemble Final SDK Folder Structure
+      - name: Package SDK
         run: |
           cp -r fetched_artifacts/* veloct-spatial-sdk-v1.0.0/ || true
-
-      - name: Inject Custom BSL 1.1 License File
-        run: |
-          cat << 'EOF' > veloct-spatial-sdk-v1.0.0/LICENSE
-          BUSINESS SOURCE LICENSE 1.1
-
-          Free for personal use, education, and open source projects.
-          Commercial use requires a paid license from mind spark.
-
-          Contact: [mindsparkceo@gmail.com]
-          Copyright 2026 Mind Spark
-          EOF
-
-      - name: Compress SDK Distribution Archive
-        run: |
           zip -r veloct-spatial-sdk-v1.0.0.zip veloct-spatial-sdk-v1.0.0/
 
-      - name: Upload SDK Bundle Artifact
+      - name: Upload Final SDK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Veloct-Spatial-Engine-SDK-Final
