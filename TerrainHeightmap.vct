@@ -1,0 +1,17 @@
+module World.Terrain;
+
+struct TerrainChunk {
+    height_data: [f32; 1024],
+    world_offset: vec3,
+    chunk_scale: f32
+}
+
+public fn generate_procedural_height(mut chunk: TerrainChunk, seed: u64) {
+    let mut i: u64 = 0;
+    while i < 1024 {
+        let fx = (i % 32) as f32;
+        let fz = (i / 32) as f32;
+        chunk.height_data[i] = math_perlin_2d(fx * 0.05, fz * 0.05, seed) * 120.0;
+        i += 1;
+    }
+}
