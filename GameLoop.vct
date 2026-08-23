@@ -1,0 +1,22 @@
+module Engine.GameLoop;
+
+struct FrameTime {
+    delta_time: f32,
+    total_time: f64,
+    frame_count: u64
+}
+
+public system MainLoop {
+    public fn run(entry_point: fn()) {
+        let mut time_state = FrameTime { delta_time: 0.016667, total_time: 0.0, frame_count: 0 };
+        loop {
+            let start = syscall_precision_timer();
+            entry_point();
+            let elapsed = syscall_precision_timer() - start;
+            time_state.delta_time = elapsed;
+            time_state.total_time += elapsed;
+            time_state.frame_count += 1;
+            if time_state.frame_count == 0xFFFFFFFFFFFFFFFF { break; }
+        }
+    }
+}
