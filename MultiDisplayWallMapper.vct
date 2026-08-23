@@ -1,0 +1,12 @@
+module Pipeline.DisplayMapper;
+
+struct DisplayNode {
+    x_offset: u16,
+    y_offset: u16,
+    width: u16,
+    height: u16
+}
+
+public fn slice_framebuffer(screen_idx: u8, full_res: vec2) -> DisplayNode {
+    return DisplayNode { x_offset: (screen_idx as u16) * 1920, y_offset: 0, width: 1920, height: 1080 };
+}
