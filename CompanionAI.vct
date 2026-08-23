@@ -1,0 +1,9 @@
+module AI.Companion;
+
+public fn follow_target(companion_pos: mut vec3, target_pos: vec3, min_dist: f32, dt: f32) {
+    let dist = vec3_distance(companion_pos, target_pos);
+    if dist > min_dist {
+        let dir = vec3_normalize(target_pos - companion_pos);
+        companion_pos += dir * 5.0 * dt;
+    }
+}
