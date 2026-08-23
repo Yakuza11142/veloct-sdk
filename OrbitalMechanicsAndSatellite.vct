@@ -1,0 +1,22 @@
+module Aerospace.Orbital;
+
+struct KeplerianElements {
+    semi_major_axis_km: f64,
+    eccentricity: f64,
+    inclination_rad: f64,
+    mean_anomaly_rad: f64
+}
+
+public system OrbitalPropagator {
+    // Propagates satellite position in Earth-Centered Inertial (ECI) frame using Kepler's Third Law
+    public fn propagate_orbit_eci(elements: KeplerianElements, dt_seconds: f64) -> vec3 {
+        let mu_earth: f64 = 398600.4418; // Earth gravitational parameter km^3/s^2
+        let mean_motion = math_sqrt(mu_earth / (elements.semi_major_axis_km * elements.semi_major_axis_km * elements.semi_major_axis_km));
+        let new_mean_anomaly = elements.mean_anomaly_rad + (mean_motion * dt_seconds);
+        
+        let x = elements.semi_major_axis_km * math_cos(new_mean_anomaly);
+        let y = elements.semi_major_axis_km * math_sin(new_mean_anomaly);
+        
+        return vec3(x as f32, y as f32, 0.0);
+    }
+}
