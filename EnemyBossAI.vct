@@ -1,0 +1,13 @@
+module AI.Boss;
+
+struct BossState {
+    health: f32,
+    phase: u8,
+    is_enraged: bool
+}
+
+public fn update_boss_phase(mut boss: BossState) {
+    if boss.health < 30.0 { boss.phase = 3; boss.is_enraged = true; }
+    else if boss.health < 60.0 { boss.phase = 2; }
+    else { boss.phase = 1; }
+}
