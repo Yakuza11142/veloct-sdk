@@ -1,0 +1,8 @@
+module Assets.DigitalHuman;
+
+[GPUCompute]
+public kernel fn subsurface_skin_pass(mut color_buffer: [vec3], scatter_radius: f32) {
+    let idx = dispatch_thread_id_x();
+    let c = color_buffer[idx];
+    color_buffer[idx] = vec3(c.r * 1.1, c.g * 0.95, c.b * 0.9); // Red bleed effect
+}
