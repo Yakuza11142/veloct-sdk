@@ -1,0 +1,6 @@
+module ICVFX.ChromaKey;
+
+public fn execute_green_key(pixel: vec3, key_color: vec3) -> f32 {
+    let dist = vec3_distance(pixel, key_color);
+    return math_clamp((dist - 0.2) / 0.3, 0.0, 1.0);
+}
