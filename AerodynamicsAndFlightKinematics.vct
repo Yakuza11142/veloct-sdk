@@ -1,0 +1,28 @@
+module Aerospace.Flight;
+
+struct FlightState {
+    position: vec3,
+    velocity: vec3,
+    orientation: vec4, // Quaternion
+    angle_of_attack: f32,
+    mach_number: f32
+}
+
+public system FlightDynamicsEngine {
+    // Calculates lift and drag forces based on dynamic pressure and Mach number
+    public fn compute_aerodynamic_forces(state: FlightState, air_density: f32, wing_area: f32) -> vec3 {
+        let speed_sq = vec3_dot(state.velocity, state.velocity);
+        let dynamic_pressure = 0.5 * air_density * speed_sq;
+        
+        let c_lift = 0.3 + 2.0 * state.angle_of_attack;
+        let c_drag = 0.02 + 0.05 * (state.angle_of_attack * state.angle_of_attack);
+        
+        let lift_force = dynamic_pressure * wing_area * c_lift;
+        let drag_force = dynamic_pressure * wing_area * c_drag;
+        
+        let forward = vec3_normalize(state.velocity);
+        let up = vec3(0.0, 1.0, 0.0);
+        
+        return (up * lift_force) - (forward * drag_force);
+    }
+}
