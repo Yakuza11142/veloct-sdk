@@ -1,0 +1,5 @@
+module Lighting.Atmosphere;
+
+public fn compute_stage_fog(distance: f32, density: f32) -> f32 {
+    return 1.0 - math_exp(-distance * density);
+}
