@@ -1,0 +1,30 @@
+module AEC.BIM;
+
+struct BIMElement {
+    element_id: u64,
+    category_flag: u16, // 1: Column, 2: Beam, 3: Slab, 4: Wall
+    volume_m3: f32,
+    is_structural: bool
+}
+
+public system BIMIngestPipeline {
+    public fn parse_ifc_entity(raw_buffer: [u8; 64], offset: u64) -> BIMElement {
+        let mut id: u64 = 0;
+        let mut cat: u16 = 0;
+        memory_copy(raw_buffer[offset], id, 0);
+        memory_copy(raw_buffer[offset + 8], cat, 0);
+        
+        return BIMElement {
+            element_id: id,
+            category_flag: cat,
+            volume_m3: 12.5,
+            is_structural: cat < 3
+        };
+    }
+
+    public fn select_lod_mesh(distance_to_cam: f32) -> u8 {
+        if distance_to_cam < 50.0 { return 0; }      // High Detail
+        else if distance_to_cam < 200.0 { return 1; } // Medium Detail
+        return 2;                                    // Low Detail Proxy
+    }
+}
