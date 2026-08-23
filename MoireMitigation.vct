@@ -1,0 +1,9 @@
+module ICVFX.AntiMoire;
+
+[GPUCompute]
+public kernel fn apply_moire_blur(mut target_buffer: [vec4], width: u32) {
+    let idx = dispatch_thread_id_x();
+    let left = target_buffer[math_max(0, idx - 1)];
+    let right = target_buffer[idx + 1];
+    target_buffer[idx] = (left + target_buffer[idx] * 2.0 + right) * 0.25;
+}
