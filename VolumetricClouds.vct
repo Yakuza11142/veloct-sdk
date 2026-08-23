@@ -1,0 +1,7 @@
+module VFX.Clouds;
+
+[GPUCompute]
+public kernel fn render_clouds(mut density_map: [f32], wind_offset: vec3) {
+    let idx = dispatch_thread_id_x();
+    density_map[idx] = math_perlin_3d(idx as f32 * 0.01 + wind_offset.x, wind_offset.y, wind_offset.z);
+}
