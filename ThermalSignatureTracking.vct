@@ -1,0 +1,20 @@
+module Forensics.Thermal;
+
+public system ThermalOpticsEngine {
+    // Isolates human body heat signature values from infrared array sensor
+    [GPUCompute]
+    public kernel fn filter_thermal_signature(raw_ir_matrix: [f32], mut binary_mask: [u8], temp_min_c: f32, temp_max_c: f32) {
+        let idx = dispatch_thread_id_x();
+        let temp_c = raw_ir_matrix[idx];
+        if temp_c >= temp_min_c && temp_c <= temp_max_c {
+            binary_mask[idx] = 255; // Highlight body heat signature
+        } else {
+            binary_mask[idx] = 0;
+        }
+    }
+
+    // Thermal dissipation decay solver for forensic surface contact evaluation
+    public fn calculate_residual_heat_decay(initial_temp_c: f32, ambient_temp_c: f32, elapsed_seconds: f32, decay_constant: f32) -> f32 {
+        return ambient_temp_c + (initial_temp_c - ambient_temp_c) * math_exp(-decay_constant * elapsed_seconds);
+    }
+}
