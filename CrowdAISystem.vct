@@ -1,0 +1,17 @@
+module AI.Crowd;
+
+struct CrowdAgent {
+    position: vec3,
+    target: vec3,
+    speed: f32
+}
+
+public system CrowdUpdateSystem {
+    query: (mut CrowdAgent),
+    override fn update(dt: f32, pipeline: mut Pipeline) {
+        pipeline.parallel_for(query, fn(mut agent) {
+            let dir = vec3_normalize(agent.target - agent.position);
+            agent.position += dir * agent.speed * dt;
+        });
+    }
+}
