@@ -1,0 +1,17 @@
+module Aerospace.Config;
+
+struct DefenseSystemConfig {
+    system_id: u32,
+    radar_frequency_ghz: f32,
+    max_g_force_limit: f32,
+    blackbox_recording_enabled: bool
+}
+
+public fn load_default_aerospace_config() -> DefenseSystemConfig {
+    return DefenseSystemConfig {
+        system_id: 0xAERO99,
+        radar_frequency_ghz: 9.5, // X-band radar default
+        max_g_force_limit: 9.0,   // Max airframe G-load
+        blackbox_recording_enabled: true
+    };
+}
