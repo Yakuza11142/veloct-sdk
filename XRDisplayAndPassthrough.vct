@@ -1,0 +1,24 @@
+module Spatial.Display;
+
+public system DisplayPipeline {
+    // Low-Latency Stereo Passthrough Composition
+    [GPUCompute]
+    public kernel fn compose_passthrough(left_cam: [vec4], right_cam: [vec4], virtual_layer: [vec4], mut final_frame: [vec4]) {
+        let idx = dispatch_thread_id_x();
+        let camera_blend = left_cam[idx];
+        let virtual_blend = virtual_layer[idx];
+        final_frame[idx] = camera_blend * (1.0 - virtual_blend.a) + virtual_blend * virtual_blend.a;
+    }
+
+    // Late-Stage Reprojection (LSR / SpaceWarp)
+    public fn apply_late_stage_reprojection(mut current_pose: mat4, target_pose: mat4, mut view_matrix: mat4) {
+        let delta_pose = mat4_mul(target_pose, mat4_inverse(current_pose));
+        view_matrix = mat4_mul(delta_pose, view_matrix);
+    }
+
+    // Lens Optical Distortion Correction
+    public fn apply_pancake_lens_warp(uv: vec2, k1: f32) -> vec2 {
+        let r2 = (uv.x - 0.5) * (uv.x - 0.5) + (uv.y - 0.5) * (uv.y - 0.5);
+        return uv * (1.0 + k1 * r2);
+    }
+}
