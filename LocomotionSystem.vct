@@ -1,0 +1,17 @@
+module Physics.Locomotion;
+
+struct LocomotionComponent {
+    position: vec3,
+    velocity: vec3,
+    grounded: bool
+}
+
+public system LocomotionSystem {
+    query: (mut LocomotionComponent),
+    override fn update(dt: f32, pipeline: mut Pipeline) {
+        pipeline.parallel_for(query, fn(mut loco) {
+            if !loco.grounded { loco.velocity.y -= 9.81 * dt; }
+            loco.position += loco.velocity * dt;
+        });
+    }
+}
