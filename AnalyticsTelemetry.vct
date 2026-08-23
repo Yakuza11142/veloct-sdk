@@ -1,0 +1,11 @@
+module System.Telemetry;
+
+struct MetricEvent {
+    event_id: u32,
+    timestamp: u64,
+    param_value: f32
+}
+
+public fn record_metric(event_id: u32, val: f32) -> MetricEvent {
+    return MetricEvent { event_id: event_id, timestamp: syscall_precision_timer(), param_value: val };
+}
