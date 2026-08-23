@@ -1,0 +1,13 @@
+module UI.Settings;
+
+struct GameSettings {
+    master_volume: f32,
+    fov: f32,
+    vsync: bool
+}
+
+public fn apply_defaults(mut config: GameSettings) {
+    config.master_volume = 0.8;
+    config.fov = 90.0;
+    config.vsync = true;
+}
