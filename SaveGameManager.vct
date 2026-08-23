@@ -1,0 +1,13 @@
+module System.SaveGame;
+
+struct SaveHeader {
+    version: u32,
+    play_time: f64,
+    player_level: u16
+}
+
+public fn write_save_header(header: SaveHeader, mut buffer: [u8; 32]) {
+    memory_copy(header.version, buffer, 0);
+    memory_copy(header.play_time, buffer, 4);
+    memory_copy(header.player_level, buffer, 12);
+}
