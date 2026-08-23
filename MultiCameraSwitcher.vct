@@ -1,0 +1,15 @@
+module Tracking.Switcher;
+
+struct CameraFeed {
+    id: u32,
+    transform: vec3,
+    is_active: bool
+}
+
+public fn switch_active_camera(feeds: mut [CameraFeed; 4], active_id: u32) {
+    let mut i: u64 = 0;
+    while i < 4 {
+        feeds[i].is_active = (feeds[i].id == active_id);
+        i += 1;
+    }
+}
