@@ -1,0 +1,12 @@
+module AI.Flying;
+
+struct FlightPath {
+    position: vec3,
+    altitude_target: f32,
+    wing_flap_freq: f32
+}
+
+public fn adjust_altitude(mut flight: FlightPath, dt: f32) {
+    let diff = flight.altitude_target - flight.position.y;
+    flight.position.y += diff * 2.0 * dt;
+}
