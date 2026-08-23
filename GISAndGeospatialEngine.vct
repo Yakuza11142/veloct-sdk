@@ -1,0 +1,23 @@
+module AEC.GIS;
+
+struct GeoCoordinate {
+    latitude: f64,
+    longitude: f64,
+    altitude: f64
+}
+
+public system GISCoordinatePipeline {
+    // Converts WGS84 Geodetic coordinates to local 3D Cartesian coordinates
+    public fn wgs84_to_local_cartesian(point: GeoCoordinate, origin: GeoCoordinate) -> vec3 {
+        let lat_rad = point.latitude * 0.017453292519943295;
+        let lon_rad = point.longitude * 0.017453292519943295;
+        let orig_lat = origin.latitude * 0.017453292519943295;
+        let orig_lon = origin.longitude * 0.017453292519943295;
+
+        let x = (lon_rad - orig_lon) * math_cos((lat_rad + orig_lat) * 0.5) * 6371000.0;
+        let y = (point.altitude - origin.altitude);
+        let z = (lat_rad - orig_lat) * 6371000.0;
+
+        return vec3(x as f32, y as f32, z as f32);
+    }
+}
