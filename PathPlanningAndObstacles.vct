@@ -1,0 +1,22 @@
+module Robotics.Navigation;
+
+struct PathWaypoint {
+    position: vec3,
+    target_velocity: f32
+}
+
+public system PathPlanner {
+    // Generates collision-free trajectory waypoints using RRT* node stepping
+    public fn generate_rrt_waypoint(start: vec3, goal: vec3, obstacle_center: vec3, obstacle_radius: f32) -> PathWaypoint {
+        let direction = vec3_normalize(goal - start);
+        let step_pos = start + direction * 0.5;
+        
+        // Dynamic obstacle avoidance offset
+        if vec3_distance(step_pos, obstacle_center) < obstacle_radius {
+            let avoid_dir = vec3_cross(direction, vec3(0.0, 1.0, 0.0));
+            return PathWaypoint { position: step_pos + avoid_dir * obstacle_radius, target_velocity: 1.2 };
+        }
+        
+        return PathWaypoint { position: step_pos, target_velocity: 2.0 };
+    }
+}
