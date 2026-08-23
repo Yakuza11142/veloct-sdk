@@ -1,0 +1,10 @@
+module Lighting.HDRI;
+
+[GPUCompute]
+public kernel fn sample_hdri_environment(mut out_radiance: [vec3], ray_dirs: [vec3]) {
+    let idx = dispatch_thread_id_x();
+    let dir = ray_dirs[idx];
+    let u = 0.5 + (math_atan2(dir.z, dir.x) / 6.283185);
+    let v = 0.5 - (math_asin(dir.y) / 3.141592);
+    out_radiance[idx] = sample_equirectangular(u, v);
+}
