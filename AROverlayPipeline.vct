@@ -1,0 +1,6 @@
+module Broadcast.AR;
+
+public fn project_ar_to_floor(world_pos: vec3, view_proj: mat4) -> vec2 {
+    let clip = mat4_mul_vec3(view_proj, world_pos);
+    return vec2(clip.x / clip.z, clip.y / clip.z);
+}
