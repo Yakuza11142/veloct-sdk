@@ -1,0 +1,17 @@
+module Commerce.Config;
+
+struct CommerceSystemConfig {
+    enterprise_id: u64,
+    supported_currency_flags: u8, // 1: NGN, 2: USD, 4: GBP
+    telemetry_streaming_enabled: bool,
+    max_data_buffer_mb: u32
+}
+
+public fn load_default_commerce_config() -> CommerceSystemConfig {
+    return CommerceSystemConfig {
+        enterprise_id: 0x8899AABBCCDDEEFF,
+        supported_currency_flags: 7, // Supports NGN, USD, GBP
+        telemetry_streaming_enabled: true,
+        max_data_buffer_mb: 512
+    };
+}
