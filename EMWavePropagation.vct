@@ -1,0 +1,18 @@
+module Scientific.Electromagnetics;
+
+public system MaxwellFDTDEngine {
+    // Solves 1-step FDTD update for Electric field from Magnetic field curl (Maxwell-Ampere Law)
+    [GPUCompute]
+    public kernel fn update_electric_field(mut e_field: [vec3], h_field: [vec3], permittivity: f32, dt: f32, dx: f32) {
+        let idx = dispatch_thread_id_x();
+        let curl_h = (h_field[idx + 1] - h_field[idx]) / dx;
+        e_field[idx] += curl_h * (dt / permittivity);
+    }
+
+    // Solves Free-Space Path Loss (FSPL) signal power attenuation for 5G/6G millimeter waves
+    public fn compute_path_loss_db(distance_m: f32, frequency_hz: f32, speed_of_light: f32) -> f32 {
+        let wavelength = speed_of_light / frequency_hz;
+        let loss = (4.0 * 3.1415926535 * distance_m) / wavelength;
+        return 20.0 * math_log10(math_max(loss, 0.0001));
+    }
+}
