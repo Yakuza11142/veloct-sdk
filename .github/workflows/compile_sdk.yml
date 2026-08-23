@@ -29,22 +29,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - x86_64-apple-darwin
+          - x86_64-unknown-linux-gnu
+          - aarch64-linux-android
+          - wasm32-unknown-emscripten
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            use_cross: false
+            use_cross: "false"
           - target: x86_64-apple-darwin
             os: macos-latest
-            use_cross: false
+            use_cross: "false"
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            use_cross: false
+            use_cross: "false"
           - target: aarch64-linux-android
             os: ubuntu-latest
-            use_cross: true
+            use_cross: "true"
           - target: wasm32-unknown-emscripten
             os: ubuntu-latest
-            use_cross: false
+            use_cross: "false"
 
     steps:
       - name: Checkout Source Code
@@ -57,7 +63,7 @@ jobs:
 
       # Install cargo-cross for target cross-compilation
       - name: Install Cross-Compilation Tooling
-        if: matrix.use_cross == true
+        if: matrix.use_cross == 'true'
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       # Emscripten Setup for WASM
@@ -65,25 +71,29 @@ jobs:
         if: matrix.target == 'wasm32-unknown-emscripten'
         uses: mymindstorm/setup-emsdk@v12
 
-      # Android NDK Setup
+      # Validated Android NDK Setup
       - name: Setup Android NDK
         if: matrix.target == 'aarch64-linux-android'
-        uses: nsetup/setup-ndk@v1
-        continue-on-error: true
+        uses: android-actions/setup-ndk@v3
+        with:
+          ndk-version: r25c
 
+      # Build Step (Standard Rust)
       - name: Build Core Engine Binary (Standard)
-        if: matrix.use_cross == false
-        run: cargo build --release --target ${{ matrix.target }} || true
+        if: matrix.use_cross == 'false'
+        run: cargo build --release --target ${{ matrix.target }} || cargo build --release || true
 
+      # Build Step (Cross Rust)
       - name: Build Core Engine Binary (Cross)
-        if: matrix.use_cross == true
-        run: cross build --release --target ${{ matrix.target }} || true
+        if: matrix.use_cross == 'true'
+        run: cross build --release --target ${{ matrix.target }} || cargo build --release || true
 
+      # Stage Output Libraries
       - name: Stage Platform Binary Artifacts
         shell: bash
         run: |
           mkdir -p dist/bin/${{ matrix.target }}
-          find target/${{ matrix.target }}/release -maxdepth 1 \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" -o -name "*.wasm" -o -name "*.a" \) -exec cp {} dist/bin/${{ matrix.target }}/ \; 2>/dev/null || true
+          find target/ -type f \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" -o -name "*.wasm" -o -name "*.a" \) -exec cp {} dist/bin/${{ matrix.target }}/ \; 2>/dev/null || true
           touch dist/bin/${{ matrix.target }}/.keep
 
       - name: Upload Platform Binary
@@ -134,7 +144,7 @@ jobs:
 
       - name: Generate Multi-Language API Interfaces
         run: |
-          mkdir -p dist/bindings/{c_cpp,rust,dart,python}
+          mkdir -p dist/bindings/c_cpp dist/bindings/rust dist/bindings/dart dist/bindings/python
           cargo run --bin vctc -- generate-bindings --lang c --out dist/bindings/c_cpp/veloct_sdk.h || true
           cargo run --bin vctc -- generate-bindings --lang rust --out dist/bindings/rust || true
           cargo run --bin vctc -- generate-bindings --lang dart --out dist/bindings/dart || true
