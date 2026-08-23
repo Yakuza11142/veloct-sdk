@@ -1,0 +1,25 @@
+module Spatial.Optimization;
+
+public system EngineOptimizationPipeline {
+    // Eye-Gaze Variable Rate Shading Setup
+    [GPUCompute]
+    public kernel fn apply_variable_rate_shading(fovea_center: vec2, mut vrs_rate_buffer: [u8]) {
+        let idx = dispatch_thread_id_x();
+        let pixel_uv = vec2((idx % 1920) as f32 / 1920.0, (idx / 1920) as f32 / 1080.0);
+        let dist_from_fovea = vec2_distance(pixel_uv, fovea_center);
+
+        if dist_from_fovea < 0.15 {
+            vrs_rate_buffer[idx] = 0; // 1x1 Full Shading
+        } else if dist_from_fovea < 0.35 {
+            vrs_rate_buffer[idx] = 1; // 2x2 Shading Rate
+        } else {
+            vrs_rate_buffer[idx] = 2; // 4x4 Low Shading Rate
+        }
+    }
+
+    // Safety Chaperone Wall Collision Enforcer
+    public fn check_guardian_boundary(head_pos: vec3, wall_plane: vec4) -> bool {
+        let dist = math_dot(head_pos, wall_plane.xyz) + wall_plane.w;
+        return dist < 0.5; // Trigger boundary visual warning within 50 cm
+    }
+}
