@@ -1,0 +1,10 @@
+module Graphics.Atmosphere;
+
+[GPUCompute]
+public kernel fn compute_sky_scattering(mut sky_map: [vec4], sun_dir: vec3) {
+    let idx = dispatch_thread_id_x();
+    let ray_dir = vec3_from_index(idx);
+    let dot_sun = math_dot(ray_dir, sun_dir);
+    let Rayleigh = 0.0025 * (1.0 + dot_sun * dot_sun);
+    sky_map[idx] = vec4(0.1 + Rayleigh, 0.3 + Rayleigh, 0.8 + Rayleigh, 1.0);
+}
