@@ -1,0 +1,12 @@
+module Broadcast.DataStream;
+
+struct TelemetryFeed {
+    score_a: u16,
+    score_b: u16,
+    time_remaining: f32
+}
+
+public fn update_scores(mut feed: TelemetryFeed, packet: [u8; 8]) {
+    feed.score_a = (packet[0] as u16) | ((packet[1] as u16) << 8);
+    feed.score_b = (packet[2] as u16) | ((packet[3] as u16) << 8);
+}
