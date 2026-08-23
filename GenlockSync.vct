@@ -1,0 +1,12 @@
+module Sync.Genlock;
+
+struct GenlockState {
+    frame_trigger: bool,
+    target_fps: f32,
+    phase_offset_ms: f32
+}
+
+public fn await_genlock_pulse(mut state: GenlockState) {
+    while !syscall_gpio_read_sync_pin() {}
+    state.frame_trigger = true;
+}
