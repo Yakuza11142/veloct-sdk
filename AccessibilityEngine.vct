@@ -1,0 +1,6 @@
+module UI.Accessibility;
+
+public fn apply_colorblind_filter(raw_color: vec3, mode: u8) -> vec3 {
+    if mode == 1 { return vec3(raw_color.r * 0.5 + raw_color.g * 0.5, raw_color.g, raw_color.b); }
+    return raw_color;
+}
