@@ -1,0 +1,9 @@
+module Graphics.Shadows;
+
+[GPUCompute]
+public kernel fn generate_cascaded_shadows(depth_map: [f32], mut shadow_mask: [f32], light_matrix: mat4) {
+    let idx = dispatch_thread_id_x();
+    let world_pos = reconstruct_position(idx, depth_map[idx]);
+    let shadow_pos = mat4_mul_vec3(light_matrix, world_pos);
+    shadow_mask[idx] = select(shadow_pos.z > depth_map[idx], 0.2, 1.0);
+}
