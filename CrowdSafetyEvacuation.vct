@@ -1,0 +1,23 @@
+module Forensics.Evacuation;
+
+struct PedestrianAgent {
+    position: vec3,
+    velocity: vec3,
+    personal_space_radius: f32
+}
+
+public system CrowdDensityEngine {
+    // Calculates compression pressure forces in bottleneck areas
+    public fn calculate_crowd_pressure(agent: PedestrianAgent, neighbor_positions: [vec3; 16], neighbor_count: u64) -> f32 {
+        let mut total_pressure: f32 = 0.0;
+        let mut i: u64 = 0;
+        while i < neighbor_count {
+            let dist = vec3_distance(agent.position, neighbor_positions[i]);
+            if dist < agent.personal_space_radius {
+                total_pressure += (agent.personal_space_radius - dist);
+            }
+            i += 1;
+        }
+        return total_pressure;
+    }
+}
