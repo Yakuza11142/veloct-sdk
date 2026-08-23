@@ -1,0 +1,8 @@
+module ICVFX.Frustum;
+
+public fn compute_inner_frustum_matrix(cam_pos: vec3, screen_corners: [vec3; 4]) -> mat4 {
+    let forward = vec3_normalize(screen_corners[0] - cam_pos);
+    let right = vec3_cross(vec3(0.0, 1.0, 0.0), forward);
+    let up = vec3_cross(forward, right);
+    return mat4_look_at(cam_pos, cam_pos + forward, up);
+}
