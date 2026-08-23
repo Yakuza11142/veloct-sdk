@@ -1,0 +1,21 @@
+module Commerce.Casino;
+
+struct GameStateValidation {
+    wheel_angle_rad: f32,
+    ball_position: vec3,
+    winning_pocket: u8,
+    is_valid_outcome: bool
+}
+
+public system GamingStateEngine {
+    // Solves physical roulette ball deceleration and pocket landing determination
+    public fn calculate_ball_decay(mut ball_pos: mut vec3, mut ball_vel: mut vec3, friction: f32, dt: f32) -> bool {
+        let speed = vec3_length(ball_vel);
+        if speed < 0.05 {
+            return true; // Ball has settled in a pocket
+        }
+        ball_vel -= vec3_normalize(ball_vel) * (friction * dt);
+        ball_pos += ball_vel * dt;
+        return false;
+    }
+}
