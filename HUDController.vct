@@ -1,0 +1,12 @@
+module UI.HUD;
+
+struct HUDElement {
+    screen_x: f32,
+    screen_y: f32,
+    opacity: f32,
+    visible: bool
+}
+
+public fn update_hud(mut elem: HUDElement, is_in_combat: bool) {
+    elem.opacity = select(is_in_combat, 1.0, 0.4);
+}
