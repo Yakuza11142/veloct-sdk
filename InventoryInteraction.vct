@@ -1,0 +1,24 @@
+module Gameplay.Inventory;
+
+struct InventorySlot {
+    item_id: u32,
+    quantity: u16,
+    durability: f32
+}
+
+struct PlayerInventory {
+    slots: [InventorySlot; 32]
+}
+
+public fn add_item(mut inv: PlayerInventory, item_id: u32, count: u16) -> bool {
+    let mut i: u64 = 0;
+    while i < 32 {
+        if inv.slots[i].item_id == 0 || inv.slots[i].item_id == item_id {
+            inv.slots[i].item_id = item_id;
+            inv.slots[i].quantity += count;
+            return true;
+        }
+        i += 1;
+    }
+    return false;
+}
