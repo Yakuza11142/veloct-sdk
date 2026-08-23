@@ -1,0 +1,16 @@
+module AI.BehaviorTrees;
+
+struct BehaviorNode {
+    node_type: u8, // 0: Selector, 1: Sequence, 2: Action
+    status: u8     // 0: Failure, 1: Success, 2: Running
+}
+
+public fn execute_sequence(nodes: [BehaviorNode; 4]) -> u8 {
+    let mut i: u64 = 0;
+    while i < 4 {
+        if nodes[i].status == 0 { return 0; }
+        if nodes[i].status == 2 { return 2; }
+        i += 1;
+    }
+    return 1;
+}
