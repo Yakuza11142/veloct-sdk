@@ -1,0 +1,13 @@
+module Medical.Radiation;
+
+public system RadiationPhysicsEngine {
+    // Calculates Bragg Peak energy deposition depth curve for proton beam therapy
+    public fn calculate_bragg_peak_dose(depth_cm: f32, beam_energy_mev: f32) -> f32 {
+        let peak_depth = beam_energy_mev * 0.15; // Approximate peak depth conversion
+        let delta = math_abs(depth_cm - peak_depth);
+        if delta < 0.2 {
+            return 100.0; // 100% maximum targeted radiation dose at tumor site
+        }
+        return 15.0 / (delta + 1.0); // Minimal entry/exit tissue dose
+    }
+}
