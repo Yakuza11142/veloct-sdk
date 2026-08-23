@@ -1,0 +1,6 @@
+module Lighting.Raytrace;
+
+public fn trace_prop_reflection(ray_origin: vec3, ray_dir: vec3, stage_plane: vec4) -> vec3 {
+    let t = -(math_dot(ray_origin, stage_plane.xyz) + stage_plane.w) / math_dot(ray_dir, stage_plane.xyz);
+    return ray_origin + ray_dir * t;
+}
