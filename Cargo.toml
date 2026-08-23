@@ -1,0 +1,15 @@
+[package]
+name = "veloct_compiler"
+version = "1.0.0"
+edition = "2021"
+authors = ["Veloct Core Development Team"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+clap = { version = "4.0", features = ["derive"] } # CLI argument parser
+spirv-builder = { version = "0.9", optional = true } # SPIR-V GPU output
+
+[[bin]]
+name = "vctc"
+path = "src/main.rs"
