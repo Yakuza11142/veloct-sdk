@@ -1,0 +1,21 @@
+module Spatial.Config;
+
+struct SpatialSessionConfig {
+    ipd_meters: f32,
+    target_refresh_rate: f32,
+    passthrough_enabled: bool,
+    foveation_level: u8
+}
+
+public fn load_default_spatial_config() -> SpatialSessionConfig {
+    return SpatialSessionConfig {
+        ipd_meters: 0.063, // 63mm default IPD
+        target_refresh_rate: 90.0,
+        passthrough_enabled: true,
+        foveation_level: 2 // Dynamic Eye-Tracked High
+    };
+}
+
+public fn serialize_mesh_bytes(vertices: [vec3; 1024], mut out_buffer: mut [u8; 12288]) {
+    memory_copy(vertices, out_buffer, 0);
+}
