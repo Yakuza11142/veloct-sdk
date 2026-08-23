@@ -1,30 +1,38 @@
 // Filename: veloct_core.vct
-// Veloct Ultra-Low-Latency Spatial & Physics Kernel
+// Veloct Ultra-Low-Latency Spatial, Physics & Floating Origin Kernel
+
+struct CameraState {
+    world_origin_high: vec4<f32>, // xyz: Double-precision High Origin Sector, w: Unused
+    world_origin_low: vec4<f32>,  // xyz: Double-precision Low Origin Sub-offset, w: Unused
+};
 
 struct SpatialEntity {
-    pos: vec4<f32>,      // xyz: Position, w: Uniform Scale
+    pos_high: vec4<f32>, // xyz: Absolute World High-Sector Position, w: Scale
+    pos_low: vec4<f32>,  // xyz: Absolute World Low-Sector Position, w: Unused
     rot: vec4<f32>,      // Quaternion (x, y, z, w)
 };
 
 struct SphereCollider {
-    center_radius: vec4<f32>, // xyz: Center, w: Radius
+    center_radius: vec4<f32>, // xyz: Local Collider Offset, w: Radius
 };
 
 struct RayQuery {
-    origin: vec4<f32>,   // xyz: Ray Origin, w: Padding
-    dir: vec4<f32>,      // xyz: Normalized Ray Dir, w: Max Distance
+    origin_high: vec4<f32>,   // xyz: Ray Origin Sector High, w: Max Distance
+    origin_low: vec4<f32>,    // xyz: Ray Origin Sub-offset Low, w: Unused
+    dir: vec4<f32>,           // xyz: Normalized Ray Dir, w: Unused
 };
 
 struct RayHitResult {
     packed_hit_dist: vec4<f32>, // x: Hit Status (1.0/0.0), y: Distance, z,w: Reserved
-    hit_pos: vec4<f32>,         // xyz: World Hit Position, w: Unused
+    hit_pos_rel: vec4<f32>,     // xyz: Camera-Relative Hit Position, w: Unused
     normal: vec4<f32>,          // xyz: Surface Normal, w: Unused
 };
 
-@group(0) @binding(0) var<storage, read> entities: array<SpatialEntity>;
-@group(0) @binding(1) var<storage, read> colliders: array<SphereCollider>;
-@group(0) @binding(2) var<storage, read> rays: array<RayQuery>;
-@group(0) @binding(3) var<storage, read_write> results: array<RayHitResult>;
+@group(0) @binding(0) var<uniform> camera: CameraState;
+@group(0) @binding(1) var<storage, read> entities: array<SpatialEntity>;
+@group(0) @binding(2) var<storage, read> colliders: array<SphereCollider>;
+@group(0) @binding(3) var<storage, read> rays: array<RayQuery>;
+@group(0) @binding(4) var<storage, read_write> results: array<RayHitResult>;
 
 // Branchless SIMD Quaternion Vector Rotation
 fn rotate_vector_fast(v: vec3<f32>, q: vec4<f32>) -> vec3<f32> {
@@ -32,7 +40,14 @@ fn rotate_vector_fast(v: vec3<f32>, q: vec4<f32>) -> vec3<f32> {
     return v + q.w * t + cross(q.xyz, t);
 }
 
-// Fused Spatial Transform & Ray-Sphere Collision (64-Thread SIMD Workgroup)
+// Compute Floating-Origin Camera-Relative Vector (Emulated double-precision subtraction)
+fn get_camera_relative_pos(pos_high: vec3<f32>, pos_low: vec3<f32>) -> vec3<f32> {
+    let delta_high = pos_high - camera.world_origin_high.xyz;
+    let delta_low = pos_low - camera.world_origin_low.xyz;
+    return delta_high + delta_low;
+}
+
+// Fused Floating Origin Transform & Ray-Sphere Collision
 @compute @workgroup_size(64, 1, 1)
 fn execute_spatial_physics_pass(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let idx = global_id.x;
@@ -45,33 +60,37 @@ fn execute_spatial_physics_pass(@builtin(global_invocation_id) global_id: vec3<u
     let entity = entities[idx];
     let collider = colliders[idx];
 
-    // 2. Fused Transform Computation
-    let local_sphere_center = collider.center_radius.xyz;
-    let radius = collider.center_radius.w * entity.pos.w;
-    let world_sphere_center = entity.pos.xyz + rotate_vector_fast(local_sphere_center, entity.rot);
+    // 2. Floating-Origin Translation (Convert Absolute World Coords to Camera-Relative f32 Space)
+    let rel_entity_pos = get_camera_relative_pos(entity.pos_high.xyz, entity.pos_low.xyz);
+    let rel_ray_origin = get_camera_relative_pos(ray.origin_high.xyz, ray.origin_low.xyz);
 
-    // 3. Branchless Ray-Sphere Intersect
-    let oc = ray.origin.xyz - world_sphere_center;
+    // 3. Fused Local-to-World Relative Transform
+    let local_sphere_center = collider.center_radius.xyz;
+    let radius = collider.center_radius.w * entity.pos_high.w;
+    let world_sphere_center_rel = rel_entity_pos + rotate_vector_fast(local_sphere_center, entity.rot);
+
+    // 4. Branchless Ray-Sphere Intersect
+    let oc = rel_ray_origin - world_sphere_center_rel;
+    let max_dist = ray.origin_high.w;
     let b = dot(oc, ray.dir.xyz);
     let c = dot(oc, oc) - (radius * radius);
     let discriminant = (b * b) - c;
 
-    // Branchless step evaluation (1.0 if hit, 0.0 if miss)
+    // Evaluate hit conditions without branch divergence
     let is_hit = step(0.0, discriminant);
     let sqrt_disc = sqrt(max(discriminant, 0.0));
     let t = -b - sqrt_disc;
 
-    // Validate distance range (0.0 < t < max_distance)
-    let valid_dist = select(0.0, 1.0, t > 0.0 && t < ray.dir.w);
+    let valid_dist = select(0.0, 1.0, t > 0.0 && t < max_dist);
     let final_hit = is_hit * valid_dist;
 
-    let hit_position = ray.origin.xyz + (ray.dir.xyz * t);
-    let surface_normal = (hit_position - world_sphere_center) * inverseSqrt(dot(hit_position - world_sphere_center, hit_position - world_sphere_center));
+    let hit_position_rel = rel_ray_origin + (ray.dir.xyz * t);
+    let surface_normal = (hit_position_rel - world_sphere_center_rel) * inverseSqrt(dot(hit_position_rel - world_sphere_center_rel, hit_position_rel - world_sphere_center_rel));
 
-    // 4. Coalesced Memory Write Back
+    // 5. Coalesced Memory Write Back
     var out_res: RayHitResult;
     out_res.packed_hit_dist = vec4<f32>(final_hit, select(-1.0, t, final_hit == 1.0), 0.0, 0.0);
-    out_res.hit_pos = vec4<f32>(select(vec3<f32>(0.0), hit_position, final_hit == 1.0), 1.0);
+    out_res.hit_pos_rel = vec4<f32>(select(vec3<f32>(0.0), hit_position_rel, final_hit == 1.0), 1.0);
     out_res.normal = vec4<f32>(select(vec3<f32>(0.0), surface_normal, final_hit == 1.0), 0.0);
 
     results[idx] = out_res;
