@@ -1,0 +1,14 @@
+module Combat.Damage;
+
+struct DamageEvent {
+    target_id: u64,
+    attacker_id: u64,
+    base_damage: f32,
+    hit_zone: u8 // 0: Body, 1: Head, 2: Limb
+}
+
+public fn apply_damage(event: DamageEvent, armor: f32) -> f32 {
+    let multiplier = select(event.hit_zone, 1.0, 2.5, 0.7);
+    let raw = event.base_damage * multiplier;
+    return math_max(0.0, raw - armor);
+}
