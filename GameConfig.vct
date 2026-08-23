@@ -1,0 +1,6 @@
+module System.Config;
+
+define MAX_ENTITIES   = 100000;
+define WORLD_SCALE    = 1.0;
+define NETWORK_TICK   = 60;
+define GRAVITY_VECTOR = vec3(0.0, -9.81, 0.0);
