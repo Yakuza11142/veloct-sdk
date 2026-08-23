@@ -1,0 +1,7 @@
+module Gameplay.Stealth;
+
+public fn calculate_visibility(light_level: f32, noise_level: f32, in_foliage: bool) -> f32 {
+    let mut vis = light_level * 0.6 + noise_level * 0.4;
+    if in_foliage { vis *= 0.25; }
+    return math_clamp(vis, 0.0, 1.0);
+}
