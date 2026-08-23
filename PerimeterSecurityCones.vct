@@ -1,0 +1,25 @@
+module Forensics.Security;
+
+struct CameraCone {
+    camera_pos: vec3,
+    look_dir: vec3,
+    fov_horizontal_deg: f32,
+    fov_vertical_deg: f32,
+    max_range_meters: f32
+}
+
+public system SecurityCoverageEngine {
+    // Evaluates if a target position falls inside a security camera's active field-of-view cone
+    public fn is_inside_coverage_cone(camera: CameraCone, target_pos: vec3) -> bool {
+        let to_target = target_pos - camera.camera_pos;
+        let dist = vec3_length(to_target);
+        if dist > camera.max_range_meters { return false; }
+
+        let dir_to_target = vec3_normalize(to_target);
+        let dot_product = vec3_dot(camera.look_dir, dir_to_target);
+        let angle_rad = math_acos(math_clamp(dot_product, -1.0, 1.0));
+        let half_fov_rad = (camera.fov_horizontal_deg * 0.5) * 0.01745329;
+
+        return angle_rad <= half_fov_rad;
+    }
+}
