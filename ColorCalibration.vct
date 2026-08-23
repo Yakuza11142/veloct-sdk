@@ -1,0 +1,8 @@
+module ICVFX.Color;
+
+public fn linear_to_aces_cg(linear_color: vec3) -> vec3 {
+    let r = linear_color.r * 0.6131 + linear_color.g * 0.3395 + linear_color.b * 0.0474;
+    let g = linear_color.r * 0.0701 + linear_color.g * 0.9164 + linear_color.b * 0.0135;
+    let b = linear_color.r * 0.0206 + linear_color.g * 0.1096 + linear_color.b * 0.8698;
+    return vec3(r, g, b);
+}
