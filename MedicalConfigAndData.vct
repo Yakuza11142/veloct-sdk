@@ -1,0 +1,17 @@
+module Medical.Config;
+
+struct MedicalSystemConfig {
+    dicom_anonymization_enabled: bool,
+    haptic_device_connected: bool,
+    voxel_resolution_mm: f32,
+    patient_session_hash: u64
+}
+
+public fn load_default_medical_config() -> MedicalSystemConfig {
+    return MedicalSystemConfig {
+        dicom_anonymization_enabled: true,
+        haptic_device_connected: true,
+        voxel_resolution_mm: 0.5, // 0.5mm isotropic voxel size
+        patient_session_hash: 0xA1B2C3D4E5F6
+    };
+}
