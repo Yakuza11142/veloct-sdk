@@ -1,0 +1,17 @@
+module VFX.Particles;
+
+struct Particle {
+    position: vec3,
+    velocity: vec3,
+    life: f32
+}
+
+public system ParticleSystem {
+    query: (mut Particle),
+    override fn update(dt: f32, pipeline: mut Pipeline) {
+        pipeline.parallel_for(query, fn(mut p) {
+            p.position += p.velocity * dt;
+            p.life -= dt;
+        });
+    }
+}
