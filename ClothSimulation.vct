@@ -1,0 +1,14 @@
+module Assets.Cloth;
+
+struct ParticleNode {
+    pos: vec3,
+    prev_pos: vec3,
+    pinned: bool
+}
+
+public fn verlet_integration(mut p: ParticleNode, gravity: vec3, dt: f32) {
+    if p.pinned { return; }
+    let temp = p.pos;
+    p.pos += (p.pos - p.prev_pos) + gravity * dt * dt;
+    p.prev_pos = temp;
+}
