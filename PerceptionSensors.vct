@@ -1,0 +1,7 @@
+module AI.Perception;
+
+public fn detect_target(npc_pos: vec3, npc_forward: vec3, target_pos: vec3, fov_deg: f32) -> bool {
+    let dir = vec3_normalize(target_pos - npc_pos);
+    let dot = math_dot(npc_forward, dir);
+    return dot >= math_cos(fov_deg * 0.0174533);
+}
