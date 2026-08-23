@@ -1,0 +1,9 @@
+module VFX.PostProcess;
+
+[GPUCompute]
+public kernel fn apply_bloom(color_in: [vec4], mut color_out: [vec4], threshold: f32) {
+    let idx = dispatch_thread_id_x();
+    let c = color_in[idx];
+    let luminance = c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722;
+    color_out[idx] = select(luminance > threshold, c * 1.5, c);
+}
