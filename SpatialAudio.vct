@@ -1,0 +1,13 @@
+module Audio.Spatial;
+
+struct SoundSource {
+    position: vec3,
+    volume: f32,
+    pitch: f32
+}
+
+public fn calculate_attenuation(source: SoundSource, listener_pos: vec3) -> f32 {
+    let dist = vec3_distance(source.position, listener_pos);
+    if dist >= 100.0 { return 0.0; }
+    return source.volume * (1.0 - (dist / 100.0));
+}
