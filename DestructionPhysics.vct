@@ -1,0 +1,12 @@
+module VFX.Destruction;
+
+struct FractureChunk {
+    position: vec3,
+    impulse: vec3,
+    is_detached: bool
+}
+
+public fn apply_impact_force(mut chunk: FractureChunk, force: vec3) {
+    chunk.impulse += force;
+    chunk.is_detached = true;
+}
