@@ -1,0 +1,15 @@
+module Quests.Engine;
+
+struct QuestStep {
+    quest_id: u32,
+    target_count: u16,
+    current_count: u16,
+    is_completed: bool
+}
+
+public fn advance_quest(mut step: QuestStep, amount: u16) {
+    step.current_count += amount;
+    if step.current_count >= step.target_count {
+        step.is_completed = true;
+    }
+}
