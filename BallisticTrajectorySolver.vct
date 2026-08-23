@@ -1,0 +1,26 @@
+module Forensics.Ballistics;
+
+struct BallisticFlightParams {
+    muzzle_velocity_mps: f32,
+    bullet_mass_kg: f32,
+    drag_coefficient: f32,
+    cross_section_m2: f32
+}
+
+public system BallisticEngine {
+    // Calculates reverse trajectory origin ray from two impact entry/exit points
+    public fn calculate_origin_vector(entry_pt: vec3, exit_pt: vec3) -> vec3 {
+        let trajectory_dir = vec3_normalize(entry_pt - exit_pt);
+        return entry_pt + trajectory_dir * 100.0; // Projected shooter location line
+    }
+
+    // Step-wise flight simulation incorporating atmospheric drag
+    public fn step_bullet_flight(mut pos: mut vec3, mut vel: mut vec3, params: BallisticFlightParams, air_density: f32, dt: f32) {
+        let speed = vec3_length(vel);
+        let drag_force = 0.5 * air_density * (speed * speed) * params.drag_coefficient * params.cross_section_m2;
+        let accel = (vec3_normalize(vel) * -drag_force) / params.bullet_mass_kg + vec3(0.0, -9.81, 0.0);
+        
+        vel += accel * dt;
+        pos += vel * dt;
+    }
+}
