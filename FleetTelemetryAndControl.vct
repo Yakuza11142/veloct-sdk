@@ -1,0 +1,18 @@
+module Robotics.Fleet;
+
+struct RobotStatus {
+    robot_id: u32,
+    battery_level: f32,
+    e_stop_active: bool,
+    current_task_id: u64
+}
+
+public system FleetController {
+    // Parses incoming ROS 2 socket messages and checks global safety e-stop bounds
+    public fn parse_ros2_telemetry(raw_payload: [u8; 32], mut status: mut RobotStatus) -> bool {
+        memory_copy(raw_payload[0], status.robot_id, 0);
+        memory_copy(raw_payload[4], status.battery_level, 0);
+        status.e_stop_active = raw_payload[8] != 0;
+        return !status.e_stop_active && status.battery_level > 0.15;
+    }
+}
