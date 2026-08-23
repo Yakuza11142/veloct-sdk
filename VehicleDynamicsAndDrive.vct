@@ -1,0 +1,16 @@
+module Robotics.Vehicle;
+
+struct WheelDriveState {
+    steering_angle: f32,
+    motor_torque: f32,
+    wheel_speed: f32
+}
+
+public system VehicleDynamics {
+    // Calculates Ackermann steering geometry angles for dual-front wheels
+    public fn calculate_ackermann_angles(steer_angle: f32, wheelbase: f32, track_width: f32, mut inner_angle: mut f32, mut outer_angle: mut f32) {
+        let tan_steer = math_tan(steer_angle);
+        inner_angle = math_atan(wheelbase * tan_steer / (wheelbase - (0.5 * track_width * tan_steer)));
+        outer_angle = math_atan(wheelbase * tan_steer / (wheelbase + (0.5 * track_width * tan_steer)));
+    }
+}
