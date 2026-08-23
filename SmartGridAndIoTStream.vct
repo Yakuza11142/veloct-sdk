@@ -1,0 +1,16 @@
+module AEC.IoT;
+
+struct IoTSensor {
+    sensor_id: u32,
+    sensor_type: u8, // 1: Temperature, 2: Electrical Load, 3: Pressure
+    value: f32,
+    alert_threshold: f32
+}
+
+public system SmartGridTelemetry {
+    public fn process_sensor_packet(sensor_data: [u8; 16], mut sensor: IoTSensor) -> bool {
+        memory_copy(sensor_data, sensor.sensor_id, 0);
+        memory_copy(sensor_data[4], sensor.value, 0);
+        return sensor.value > sensor.alert_threshold;
+    }
+}
