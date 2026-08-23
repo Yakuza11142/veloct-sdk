@@ -1,0 +1,13 @@
+module Pipeline.Recorder;
+
+struct TakeFrame {
+    frame_number: u64,
+    cam_pos: vec3,
+    cam_rot: vec3
+}
+
+public fn record_frame_data(frame: TakeFrame, mut file_buffer: [u8; 32]) {
+    memory_copy(frame.frame_number, file_buffer, 0);
+    memory_copy(frame.cam_pos, file_buffer, 8);
+    memory_copy(frame.cam_rot, file_buffer, 20);
+}
