@@ -1,0 +1,12 @@
+module Environment.Weather;
+
+struct WeatherState {
+    rain_intensity: f32,
+    wind_vector: vec3,
+    fog_density: f32
+}
+
+public fn update_weather(mut weather: WeatherState, dt: f32) {
+    weather.rain_intensity = math_clamp(weather.rain_intensity + 0.01 * dt, 0.0, 1.0);
+    weather.fog_density = weather.rain_intensity * 0.05;
+}
