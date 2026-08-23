@@ -1,0 +1,17 @@
+module Gameplay.Abilities;
+
+struct Ability {
+    ability_id: u32,
+    cooldown: f32,
+    stamina_cost: f32,
+    current_cd: f32
+}
+
+public fn cast_ability(mut ability: Ability, mut stamina: f32) -> bool {
+    if ability.current_cd <= 0.0 && stamina >= ability.stamina_cost {
+        stamina -= ability.stamina_cost;
+        ability.current_cd = ability.cooldown;
+        return true;
+    }
+    return false;
+}
