@@ -1,0 +1,6 @@
+module Pipeline.Automation;
+
+public fn send_crane_command(target_height: f32, speed: f32) {
+    let payload = vec2(target_height, speed);
+    syscall_socket_send(0x01, payload);
+}
