@@ -1,0 +1,21 @@
+module AEC.FEA;
+
+struct StructuralNode {
+    position: vec3,
+    applied_force: vec3,
+    displacement: vec3,
+    is_fixed: bool
+}
+
+public system FiniteElementAnalysis {
+    public fn calculate_beam_stress(node_a: StructuralNode, node_b: StructuralNode, elasticity_mpa: f32) -> f32 {
+        let length = vec3_distance(node_a.position, node_b.position);
+        let delta = vec3_distance(node_a.displacement, node_b.displacement);
+        let strain = delta / length;
+        return strain * elasticity_mpa;
+    }
+
+    public fn verify_seismic_load(mass: f32, acceleration_g: f32) -> f32 {
+        return mass * (acceleration_g * 9.81);
+    }
+}
