@@ -1,0 +1,37 @@
+module Scientific.Quantum;
+
+struct ComplexVal {
+    real: f32,
+    imag: f32
+}
+
+struct QubitState {
+    alpha: ComplexVal, // |0> state amplitude
+    beta: ComplexVal   // |1> state amplitude
+}
+
+public system QuantumEngine {
+    // Computes Bloch Sphere spherical coordinates from complex state amplitudes
+    public fn compute_bloch_coordinates(state: QubitState, mut theta: mut f32, mut phi: mut f32) {
+        let alpha_mag = math_sqrt(state.alpha.real * state.alpha.real + state.alpha.imag * state.alpha.imag);
+        theta = 2.0 * math_acos(math_clamp(alpha_mag, -1.0, 1.0));
+        
+        let phase_alpha = math_atan2(state.alpha.imag, state.alpha.real);
+        let phase_beta  = math_atan2(state.beta.imag, state.beta.real);
+        phi = phase_beta - phase_alpha;
+    }
+
+    // Applies Single-Qubit Hadamard Gate matrix transformation
+    public fn apply_hadamard(mut state: mut QubitState) {
+        let inv_sqrt2 = 0.70710678;
+        let new_alpha_r = inv_sqrt2 * (state.alpha.real + state.beta.real);
+        let new_alpha_i = inv_sqrt2 * (state.alpha.imag + state.beta.imag);
+        let new_beta_r  = inv_sqrt2 * (state.alpha.real - state.beta.real);
+        let new_beta_i  = inv_sqrt2 * (state.alpha.imag - state.beta.imag);
+
+        state.alpha.real = new_alpha_r;
+        state.alpha.imag = new_alpha_i;
+        state.beta.real  = new_beta_r;
+        state.beta.imag  = new_beta_i;
+    }
+}
