@@ -1,0 +1,13 @@
+module Broadcast.Telestrator;
+
+struct StrokePoint {
+    point: vec3,
+    color: vec4
+}
+
+public fn add_annotation_point(points: mut [StrokePoint; 128], count: mut u64, pos: vec3) {
+    if count < 128 {
+        points[count] = StrokePoint { point: pos, color: vec4(1.0, 0.0, 0.0, 1.0) };
+        count += 1;
+    }
+}
