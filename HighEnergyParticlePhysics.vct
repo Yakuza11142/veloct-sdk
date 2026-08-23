@@ -1,0 +1,23 @@
+module Scientific.Particles;
+
+struct SubatomicParticle {
+    position: vec3,
+    momentum: vec3,
+    charge: f32,
+    rest_mass: f32
+}
+
+public system RelativisticParticleEngine {
+    // Updates particle position & momentum under Lorentz force with relativistic Gamma factor correction
+    public fn step_lorentz_motion(mut particle: mut SubatomicParticle, e_field: vec3, b_field: vec3, dt: f32, speed_of_light: f32) {
+        let p_sq = vec3_dot(particle.momentum, particle.momentum);
+        let m_sq_c_sq = particle.rest_mass * particle.rest_mass * speed_of_light * speed_of_light;
+        let gamma = math_sqrt(1.0 + (p_sq / m_sq_c_sq));
+        
+        let velocity = particle.momentum / (particle.rest_mass * gamma);
+        let lorentz_force = (e_field + vec3_cross(velocity, b_field)) * particle.charge;
+        
+        particle.momentum += lorentz_force * dt;
+        particle.position += velocity * dt;
+    }
+}
