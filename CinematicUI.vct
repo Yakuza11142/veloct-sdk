@@ -1,0 +1,10 @@
+module UI.Cinematics;
+
+struct Letterbox {
+    bar_height: f32,
+    target_height: f32
+}
+
+public fn animate_cinematic_bars(mut box: Letterbox, dt: f32) {
+    box.bar_height += (box.target_height - box.bar_height) * 5.0 * dt;
+}
