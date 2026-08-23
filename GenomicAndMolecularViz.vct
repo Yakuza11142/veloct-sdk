@@ -1,0 +1,17 @@
+module Medical.Genomics;
+
+struct AtomNode {
+    atom_type: u8, // 1: Carbon, 2: Hydrogen, 3: Nitrogen, 4: Oxygen
+    position: vec3,
+    charge: f32
+}
+
+public system MolecularDynamicsEngine {
+    // Calculates Coulomb electrostatic force between two molecular atoms
+    public fn compute_electrostatic_force(atom_a: AtomNode, atom_b: AtomNode) -> vec3 {
+        let diff = atom_b.position - atom_a.position;
+        let dist_sq = math_max(vec3_dot(diff, diff), 0.0001);
+        let force_mag = (8.9875e9 * atom_a.charge * atom_b.charge) / dist_sq;
+        return vec3_normalize(diff) * force_mag;
+    }
+}
