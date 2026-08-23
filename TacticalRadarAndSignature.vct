@@ -1,0 +1,18 @@
+module Aerospace.Sensors;
+
+struct RadarTarget {
+    position: vec3,
+    velocity: vec3,
+    rcs_sqm: f32
+}
+
+public system RadarSignatureEngine {
+    // Calculates Radar Equation return signal power received by array
+    public fn compute_radar_return_power(target: RadarTarget, radar_pos: vec3, transmit_power_w: f32, gain: f32, wavelength: f32) -> f32 {
+        let distance = vec3_distance(target.position, radar_pos);
+        let dist_sq = distance * distance;
+        let numerator = transmit_power_w * gain * gain * (wavelength * wavelength) * target.rcs_sqm;
+        let denominator = (4.0 * 3.1415926535) * (4.0 * 3.1415926535) * (4.0 * 3.1415926535) * (dist_sq * dist_sq);
+        return numerator / denominator;
+    }
+}
