@@ -1,0 +1,11 @@
+module VFX.Decals;
+
+struct Decal {
+    position: vec3,
+    normal: vec3,
+    decal_type: u16
+}
+
+public fn place_decal(hit_pos: vec3, hit_norm: vec3, decal_id: u16) -> Decal {
+    return Decal { position: hit_pos, normal: hit_norm, decal_type: decal_id };
+}
