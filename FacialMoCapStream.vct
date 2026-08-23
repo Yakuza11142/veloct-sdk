@@ -1,0 +1,13 @@
+module Assets.FacialMoCap;
+
+struct BlendShapes {
+    jaw_open: f32,
+    eye_blink_l: f32,
+    eye_blink_r: f32
+}
+
+public fn apply_blendshapes(buffer: [f32; 3], mut weights: BlendShapes) {
+    weights.jaw_open   = buffer[0];
+    weights.eye_blink_l = buffer[1];
+    weights.eye_blink_r = buffer[2];
+}
