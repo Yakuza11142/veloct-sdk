@@ -1,0 +1,5 @@
+module Broadcast.VirtualSet;
+
+public fn blend_physical_virtual(physical_depth: f32, virtual_depth: f32) -> bool {
+    return virtual_depth < physical_depth;
+}
