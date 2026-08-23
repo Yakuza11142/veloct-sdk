@@ -1,0 +1,18 @@
+module Player.Controller;
+
+struct PlayerState {
+    health: f32 = 100.0,
+    stamina: f32 = 100.0,
+    is_sprinting: bool = false,
+    is_crouching: bool = false
+}
+
+public fn process_player_input(mut state: PlayerState, input_mask: u32, dt: f32) {
+    if (input_mask & 0x01) != 0 && state.stamina > 0.0 {
+        state.is_sprinting = true;
+        state.stamina -= 15.0 * dt;
+    } else {
+        state.is_sprinting = false;
+        state.stamina = math_min(100.0, state.stamina + 10.0 * dt);
+    }
+}
