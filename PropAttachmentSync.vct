@@ -1,0 +1,5 @@
+module Assets.Props;
+
+public fn attach_virtual_vfx(prop_transform: mat4, vfx_offset: vec3) -> vec3 {
+    return mat4_mul_vec3(prop_transform, vfx_offset);
+}
