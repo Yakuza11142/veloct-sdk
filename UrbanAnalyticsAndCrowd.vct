@@ -1,0 +1,18 @@
+module AEC.Urban;
+
+struct Agent {
+    position: vec3,
+    target_exit: vec3,
+    speed: f32
+}
+
+public system EvacuationSimulator {
+    public fn update_crowd_flow(mut agents: mut [Agent; 64], dt: f32) {
+        let mut i: u64 = 0;
+        while i < 64 {
+            let dir = vec3_normalize(agents[i].target_exit - agents[i].position);
+            agents[i].position += dir * agents[i].speed * dt;
+            i += 1;
+        }
+    }
+}
