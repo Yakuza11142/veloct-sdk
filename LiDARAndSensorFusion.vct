@@ -1,0 +1,21 @@
+module Robotics.Perception;
+
+struct OccupancyGrid {
+    resolution: f32,
+    grid_cells: [u8; 1024] // 0: Free, 128: Unknown, 255: Occupied
+}
+
+public system SensorFusionEngine {
+    // Projects 3D LiDAR point cloud into a 2D occupancy grid map
+    public fn update_occupancy_grid(point_cloud: [vec3; 256], mut grid: mut OccupancyGrid) {
+        let mut i: u64 = 0;
+        while i < 256 {
+            let pt = point_cloud[i];
+            let grid_x = math_clamp(((pt.x / grid.resolution) + 16.0) as i32, 0, 31);
+            let grid_y = math_clamp(((pt.z / grid.resolution) + 16.0) as i32, 0, 31);
+            let cell_idx = (grid_y * 32 + grid_x) as u64;
+            grid.grid_cells[cell_idx] = 255; // Mark occupied cell
+            i += 1;
+        }
+    }
+}
