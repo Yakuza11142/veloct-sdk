@@ -1,0 +1,8 @@
+module Assets.Hair;
+
+public fn kajiya_kay_specular(tangent: vec3, view_dir: vec3, light_dir: vec3, exponent: f32) -> f32 {
+    let h = vec3_normalize(light_dir + view_dir);
+    let dot_th = math_dot(tangent, h);
+    let sin_th = math_sqrt(1.0 - dot_th * dot_th);
+    return math_pow(sin_th, exponent);
+}
