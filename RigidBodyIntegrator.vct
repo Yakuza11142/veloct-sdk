@@ -1,0 +1,19 @@
+module Physics.RigidBody;
+
+struct RigidBody {
+    position: vec3,
+    velocity: vec3,
+    acceleration: vec3,
+    mass: f32
+}
+
+public system PhysicsIntegrator {
+    query: (mut RigidBody),
+    override fn update(dt: f32, pipeline: mut Pipeline) {
+        pipeline.parallel_for(query, fn(mut body) {
+            body.velocity += body.acceleration * dt;
+            body.position += body.velocity * dt;
+            body.acceleration = vec3(0.0, -9.81, 0.0);
+        });
+    }
+}
