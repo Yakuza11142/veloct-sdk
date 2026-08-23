@@ -1,0 +1,11 @@
+module World.Interactions;
+
+struct TriggerZone {
+    center: vec3,
+    radius: f32,
+    is_active: bool
+}
+
+public fn check_interaction(zone: TriggerZone, player_pos: vec3) -> bool {
+    return zone.is_active && (vec3_distance(zone.center, player_pos) <= zone.radius);
+}
