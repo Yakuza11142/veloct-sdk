@@ -1,0 +1,17 @@
+module Forensics.Config;
+
+struct ForensicsAuditConfig {
+    hash_algorithm_id: u8, // 1: SHA-256
+    measurement_unit_metric: bool,
+    tamper_lock_enabled: bool,
+    audit_session_id: u64
+}
+
+public fn load_default_forensics_config() -> ForensicsAuditConfig {
+    return ForensicsAuditConfig {
+        hash_algorithm_id: 1,
+        measurement_unit_metric: true,
+        tamper_lock_enabled: true,
+        audit_session_id: 0x9F8E7D6C5B4A3S21
+    };
+}
