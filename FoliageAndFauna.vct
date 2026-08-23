@@ -1,0 +1,12 @@
+module AI.Fauna;
+
+struct Creature {
+    position: vec3,
+    state: u8 // 0: Idle, 1: Fleeing
+}
+
+public fn update_fauna_fear(mut animal: Creature, threat_pos: vec3) {
+    if vec3_distance(animal.position, threat_pos) < 15.0 {
+        animal.state = 1;
+    }
+}
