@@ -1,0 +1,17 @@
+module AEC.Config;
+
+struct ProjectTwinConfig {
+    project_id: u64,
+    origin_latitude: f64,
+    origin_longitude: f64,
+    update_rate_hz: f32
+}
+
+public fn load_default_twin_config() -> ProjectTwinConfig {
+    return ProjectTwinConfig {
+        project_id: 0xDEADBEEF1234,
+        origin_latitude: 9.0765,  // Default project latitude
+        origin_longitude: 7.3986, // Default project longitude
+        update_rate_hz: 30.0
+    };
+}
