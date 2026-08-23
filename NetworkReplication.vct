@@ -1,0 +1,14 @@
+module Network.Replication;
+
+struct EntityStateSnapshot {
+    entity_id: u64,
+    position: vec3,
+    rotation: vec4,
+    timestamp: u64
+}
+
+public fn serialize_snapshot(snapshot: EntityStateSnapshot, buffer: mut [u8; 64]) {
+    memory_copy(snapshot.position, buffer, 0);
+    memory_copy(snapshot.rotation, buffer, 12);
+    memory_copy(snapshot.timestamp, buffer, 28);
+}
