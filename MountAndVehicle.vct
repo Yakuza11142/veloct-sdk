@@ -1,0 +1,13 @@
+module Vehicle.Mount;
+
+struct Mount {
+    rider_id: u64,
+    top_speed: f32,
+    current_speed: f32,
+    position: vec3
+}
+
+public fn update_mount_physics(mut mount: Mount, accel_input: f32, dt: f32) {
+    mount.current_speed = math_clamp(mount.current_speed + accel_input * 10.0 * dt, 0.0, mount.top_speed);
+    mount.position.z += mount.current_speed * dt;
+}
