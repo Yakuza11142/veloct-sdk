@@ -1,0 +1,12 @@
+module UI.Inventory;
+
+struct SlotUI {
+    x: u16, y: u16,
+    width: u16, height: u16,
+    is_hovered: bool
+}
+
+public fn process_hover(mut slot: SlotUI, mouse_x: u16, mouse_y: u16) {
+    slot.is_hovered = (mouse_x >= slot.x && mouse_x <= slot.x + slot.width) &&
+                       (mouse_y >= slot.y && mouse_y <= slot.y + slot.height);
+}
