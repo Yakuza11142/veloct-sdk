@@ -1,0 +1,17 @@
+module Scientific.Config;
+
+struct ScientificConstants {
+    speed_of_light: f32,
+    vacuum_permittivity: f32,
+    vacuum_permeability: f32,
+    earth_angular_velocity: f32
+}
+
+public fn load_physical_constants() -> ScientificConstants {
+    return ScientificConstants {
+        speed_of_light: 299792458.0,        // m/s
+        vacuum_permittivity: 8.854187817e-12, // F/m
+        vacuum_permeability: 1.256637061e-6,  // H/m
+        earth_angular_velocity: 7.292115e-5   // rad/s
+    };
+}
