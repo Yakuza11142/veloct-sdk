@@ -1,0 +1,17 @@
+module Lighting.DMX;
+
+struct DMXFixture {
+    address: u16,
+    intensity: u8,
+    red: u8,
+    green: u8,
+    blue: u8
+}
+
+public fn parse_artnet_buffer(dmx_buffer: [u8; 512], mut fixture: DMXFixture) {
+    let offset = fixture.address as u64;
+    fixture.intensity = dmx_buffer[offset];
+    fixture.red       = dmx_buffer[offset + 1];
+    fixture.green     = dmx_buffer[offset + 2];
+    fixture.blue      = dmx_buffer[offset + 3];
+}
