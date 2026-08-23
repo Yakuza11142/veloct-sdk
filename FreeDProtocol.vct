@@ -1,0 +1,21 @@
+module Tracking.FreeD;
+
+struct CameraTransform {
+    position: vec3,
+    rotation: vec3,
+    focus: f32,
+    zoom: f32
+}
+
+public fn parse_freed_packet(buffer: [u8; 29]) -> CameraTransform {
+    let raw_x = ((buffer[2] as i32) << 16) | ((buffer[3] as i32) << 8) | (buffer[4] as i32);
+    let raw_y = ((buffer[5] as i32) << 16) | ((buffer[6] as i32) << 8) | (buffer[7] as i32);
+    let raw_z = ((buffer[8] as i32) << 16) | ((buffer[9] as i32) << 8) | (buffer[10] as i32);
+    
+    return CameraTransform {
+        position: vec3(raw_x as f32 / 64000.0, raw_y as f32 / 64000.0, raw_z as f32 / 64000.0),
+        rotation: vec3(0.0, 0.0, 0.0),
+        focus: 1.0,
+        zoom: 1.0
+    };
+}
