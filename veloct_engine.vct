@@ -1,0 +1,143 @@
+// ============================================================================
+// VELOCT SPATIAL ENGINE - UNIFIED AAA POLYMORPHIC COMPUTE SUITE
+// File: veloct_engine.vct (WGSL SIMD Multi-Stage Compute Pipeline)
+// Memory Alignment: 16-Byte Boundary (#[repr(C, align(16))])
+// Capabilities: Procedural Asset Synthesis, Spatial Hash Grid & SIMD Physics Solver
+// ============================================================================
+
+struct UniversalPrimitiveVector {
+    position: vec4<f32>,     // [x, y, z, dual_float_high_low_marker]
+    velocity: vec4<f32>,     // [vx, vy, vz, mass]
+    force: vec4<f32>,        // [fx, fy, fz, damping]
+    material_mask: vec4<f32> // [elasticity, stiffness, type_id, spatial_cell_id]
+};
+
+struct EngineUniforms {
+    delta_time: f32,
+    entity_count: u32,
+    grid_cell_size: f32,
+    seed: f32,
+    gravity: vec4<f32>,      // [gx, gy, gz, unused]
+    origin: vec4<f32>,       // [x, y, z, radius]
+};
+
+@group(0) @binding(0) var<uniform> uniforms: EngineUniforms;
+@group(0) @binding(1) var<storage, read_write> entity_buffer: array<UniversalPrimitiveVector>;
+@group(0) @binding(2) var<storage, read_write> spatial_grid: array<u32>; // Dynamic GPU Spatial Hash Index
+
+// ----------------------------------------------------------------------------
+// HELPER MATH: Branchless Spatial Hashing & Pseudo-Random Noise
+// ----------------------------------------------------------------------------
+fn hash31(p: vec3<f32>) -> vec3<f32> {
+    var p3 = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xxy + p3.yzz) * p3.zyx);
+}
+
+fn calculate_spatial_cell(pos: vec3<f32>, cell_size: f32) -> u32 {
+    let grid_pos = vec3<i32>(floor(pos / cell_size));
+    let hash = u32((grid_pos.x * 73856093) ^ (grid_pos.y * 19349663) ^ (grid_pos.z * 83492791));
+    return hash % 65536u; // Fits into spatial hash map
+}
+
+// ============================================================================
+// STAGE 1: PROCEDURAL VECTOR ASSET SYNTHESIS
+// ============================================================================
+@compute @workgroup_size(256)
+fn veloct_synthesize(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    if (index >= uniforms.entity_count) {
+        return;
+    }
+
+    let id_f = f32(index);
+    let sample_pos = vec3<f32>(id_f * 0.123, uniforms.seed, id_f * 0.456);
+    let noise = (hash31(sample_pos) - 0.5f) * 2.0f;
+
+    // Generate dynamic geometry directly in VRAM around origin
+    let gen_pos = uniforms.origin.xyz + (noise * uniforms.origin.w);
+
+    var upv: UniversalPrimitiveVector;
+    upv.position = vec4<f32>(gen_pos, 1.0f);
+    upv.velocity = vec4<f32>(0.0f, 0.0f, 0.0f, 1.0f); // Default 1.0kg mass
+    upv.force = vec4<f32>(0.0f, 0.0f, 0.0f, 0.02f);   // 0.02 Damping
+    upv.material_mask = vec4<f32>(0.8f, 150.0f, 0.0f, 0.0f); // [Elasticity, Stiffness, Type 0 (Rigid), Cell ID]
+
+    entity_buffer[index] = upv;
+}
+
+// ============================================================================
+// STAGE 2: SPATIAL ACCELERATION GRID PARTITIONING
+// ============================================================================
+@compute @workgroup_size(256)
+fn veloct_spatial_hash(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    if (index >= uniforms.entity_count) {
+        return;
+    }
+
+    var upv = entity_buffer[index];
+    let cell_id = calculate_spatial_cell(upv.position.xyz, uniforms.grid_cell_size);
+    
+    // Store cell ID into material mask and register entity index to grid
+    upv.material_mask.w = f32(cell_id);
+    spatial_grid[index] = cell_id;
+    
+    entity_buffer[index] = upv;
+}
+
+// ============================================================================
+// STAGE 3: MAIN SIMD PHYSICS INTEGRATOR, CONSTRAINTS & FRACTURE SOLVER
+// ============================================================================
+@compute @workgroup_size(256)
+fn veloct_physics_solve(@builtin(global_invocation_id) global_id: vec3<u32>) {
+    let index = global_id.x;
+    if (index >= uniforms.entity_count) {
+        return;
+    }
+
+    var upv = entity_buffer[index];
+    let dt = uniforms.delta_time;
+    let mass = upv.velocity.w;
+    let type_id = u32(upv.material_mask.z);
+
+    // Branchless Inverse Mass Calculation (mass <= 0.0 -> static physical object)
+    let inv_mass = select(1.0 / mass, 0.0f, mass <= 0.0f);
+
+    // 1. Force Integration Step
+    let total_force = upv.force.xyz + (uniforms.gravity.xyz * mass);
+    let acceleration = total_force * inv_mass;
+    let damping = upv.force.w;
+
+    upv.velocity = vec4<f32>((upv.velocity.xyz + acceleration * dt) * (1.0f - damping * dt), mass);
+
+    // 2. Polymorphic Physical Behavior Evaluation
+    let stiffness = upv.material_mask.y;
+    let elasticity = upv.material_mask.x;
+
+    // Type 1 (Soft-Body / Cloth): Hooke's Law Distance Restoration Vector
+    let spring_force = -stiffness * upv.position.xyz * dt * f32(type_id == 1u);
+    upv.velocity = vec4<f32>(upv.velocity.xyz + spring_force, mass);
+
+    // Integrate Position
+    upv.position = vec4<f32>(upv.position.xyz + upv.velocity.xyz * dt, upv.position.w);
+
+    // 3. Ground Collision & Material Bounce
+    let ground_level = 0.0f;
+    let penetration = ground_level - upv.position.y;
+
+    upv.position.y = select(upv.position.y, ground_level, penetration > 0.0f);
+    upv.velocity.y = select(upv.velocity.y, -upv.velocity.y * elasticity, penetration > 0.0f);
+
+    // 4. AAA Fracture & Destruction Engine: Dynamic Bitwise State Flipping
+    // High impact force converts Rigid entity (Type 0) into dynamic Particle/Debris (Type 2)
+    let force_magnitude = length(total_force);
+    let is_fractured = f32(force_magnitude > 25000.0f && type_id == 0u);
+    upv.material_mask.z = select(upv.material_mask.z, 2.0f, is_fractured > 0.0f);
+
+    // Reset force accumulator for next frame dispatch
+    upv.force = vec4<f32>(0.0f, 0.0f, 0.0f, damping);
+
+    // Coalesced VRAM Write Back
+    entity_buffer[index] = upv;
+}
