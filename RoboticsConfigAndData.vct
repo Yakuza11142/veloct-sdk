@@ -1,0 +1,17 @@
+module Robotics.Config;
+
+struct IndustrialRobotConfig {
+    dof_count: u8,
+    max_payload_kg: f32,
+    safety_zone_radius: f32,
+    ros_domain_id: u8
+}
+
+public fn load_default_robotics_config() -> IndustrialRobotConfig {
+    return IndustrialRobotConfig {
+        dof_count: 6,
+        max_payload_kg: 25.0,
+        safety_zone_radius: 2.5, // 2.5 meters safety halo
+        ros_domain_id: 42
+    };
+}
