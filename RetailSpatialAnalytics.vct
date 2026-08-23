@@ -1,0 +1,34 @@
+module Commerce.Retail;
+
+struct CustomerDwellZone {
+    zone_id: u16,
+    dwell_time_seconds: f32,
+    gaze_target: vec3
+}
+
+public system RetailAnalyticsEngine {
+    // Tracks shelf interaction duration and dwell intensity
+    public fn process_dwell_interaction(mut zone: mut CustomerDwellZone, is_looking_at_shelf: bool, dt: f32) {
+        if is_looking_at_shelf {
+            zone.dwell_time_seconds += dt;
+        }
+    }
+
+    // Converts floor traffic counts into density heatmap intensity
+    [GPUCompute]
+    public kernel fn generate_traffic_heatmap(position_matrix: [vec2; 128], mut heatmap_buffer: [f32; 1024]) {
+        let idx = dispatch_thread_id_x();
+        let cell_uv = vec2((idx % 32) as f32 / 32.0, (idx / 32) as f32 / 32.0);
+        
+        let mut intensity: f32 = 0.0;
+        let mut i: u64 = 0;
+        while i < 128 {
+            let dist = vec2_distance(cell_uv, position_matrix[i]);
+            if dist < 0.1 {
+                intensity += (0.1 - dist) * 10.0;
+            }
+            i += 1;
+        }
+        heatmap_buffer[idx] = math_min(intensity, 1.0);
+    }
+}
