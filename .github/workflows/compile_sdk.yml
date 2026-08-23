@@ -32,19 +32,14 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact_name: veloct_core_x86_64.dll
-          - target: aarch64-apple-darwin
+          - target: x86_64-apple-darwin
             os: macos-latest
-            artifact_name: VeloctCore.framework
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact_name: libveloct_core.so
           - target: aarch64-linux-android
             os: ubuntu-latest
-            artifact_name: libveloct_core_android.so
           - target: wasm32-unknown-emscripten
             os: ubuntu-latest
-            artifact_name: veloct_core.wasm
 
     steps:
       - name: Checkout Source Code
@@ -55,6 +50,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Extra target setup for WebAssembly
+      - name: Setup Emscripten (WASM)
+        if: matrix.target == 'wasm32-unknown-emscripten'
+        uses: mymindstorm/setup-emsdk@v12
+
+      # Extra target setup for Android
+      - name: Setup Android NDK
+        if: matrix.target == 'aarch64-linux-android'
+        uses: nsetup/setup-ndk@v1
+        with:
+          ndk-version: r25c
+
       - name: Build Core Engine Binary
         run: |
           cargo build --release --target ${{ matrix.target }}
@@ -63,13 +70,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/bin/${{ matrix.target }}
-          if [ -d "target/${{ matrix.target }}/release" ]; then
-            cp target/${{ matrix.target }}/release/*.so dist/bin/${{ matrix.target }}/ 2>/dev/null || true
-            cp target/${{ matrix.target }}/release/*.dll dist/bin/${{ matrix.target }}/ 2>/dev/null || true
-            cp target/${{ matrix.target }}/release/*.dylib dist/bin/${{ matrix.target }}/ 2>/dev/null || true
-            cp target/${{ matrix.target }}/release/*.wasm dist/bin/${{ matrix.target }}/ 2>/dev/null || true
-            cp target/${{ matrix.target }}/release/*.a dist/bin/${{ matrix.target }}/ 2>/dev/null || true
-          fi
+          find target/${{ matrix.target }}/release -maxdepth 1 \( -name "*.so" -o -name "*.dll" -o -name "*.dylib" -o -name "*.wasm" -o -name "*.a" \) -exec cp {} dist/bin/${{ matrix.target }}/ \; 2>/dev/null || true
 
       - name: Upload Platform Binary
         uses: actions/upload-artifact@v4
@@ -175,28 +176,3 @@ jobs:
         with:
           name: Veloct-Spatial-Engine-SDK-Final
           path: veloct-spatial-sdk-v1.0.0.zip
-
-      - name: Create GitHub Release Artifact (Tagged Commits Only)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: veloct-spatial-sdk-v1.0.0.zip
-          body: |
-            ## Veloct Spatial Engine SDK v1.0.0
-
-            ### Key Features
-            - Full 10-Domain Spatial & Computing Architecture.
-            - Pre-compiled cross-platform native binaries (Windows, macOS, Linux, Android, WebAssembly).
-            - Native GPU Shaders (SPIR-V, Metal, HLSL).
-            - SDK Bindings for C/C++, Rust, Dart/Flutter, and Python.
-
-            ---
-            ### License Terms
-            BUSINESS SOURCE LICENSE 1.1
-            Free for personal use, education, and open source projects.
-            Commercial use requires a paid license from Mind Spark.
-
-            **Contact:** mindsparkceo@gmail.com  
-            **Copyright:** © 2026 Mind Spark
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
