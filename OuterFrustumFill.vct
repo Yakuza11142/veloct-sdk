@@ -1,0 +1,7 @@
+module ICVFX.OuterFrustum;
+
+[GPUCompute]
+public kernel fn fill_outer_wall(mut led_wall_buffer: [vec4], env_hdri: [vec4]) {
+    let idx = dispatch_thread_id_x();
+    led_wall_buffer[idx] = env_hdri[idx] * 0.35; // Dimmed environmental fill
+}
