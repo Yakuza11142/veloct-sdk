@@ -1,0 +1,14 @@
+module Scientific.Plasma;
+
+public system MagnetohydrodynamicsEngine {
+    // Solves magnetic Lorentz force density vector (J x B) acting on plasma fluid
+    public fn compute_lorentz_force(current_density: vec3, magnetic_field: vec3) -> vec3 {
+        return vec3_cross(current_density, magnetic_field);
+    }
+
+    // Calculates magnetic pressure force gradient in fusion tokamak
+    public fn compute_magnetic_pressure(b_field: vec3, vacuum_permeability: f32) -> f32 {
+        let b_sq = vec3_dot(b_field, b_field);
+        return b_sq / (2.0 * vacuum_permeability);
+    }
+}
