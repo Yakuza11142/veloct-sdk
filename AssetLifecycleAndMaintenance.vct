@@ -1,21 +1,122 @@
-module Commerce.Assets;
+// ============================================================================
+// 1. DATA CORE: COMPACT SENSOR HISTOGRAM SLOTS
+// ============================================================================
 
-struct MachineAssetHealth {
-    asset_id: u64,
-    operating_hours: f32,
-    vibration_frequency_hz: f32,
-    temperature_c: f32,
-    failure_risk_score: f32
+/// A raw snapshot frame captured from physical machinery via industrial PLCs/MQTT.
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct TelemetryFrame {
+    pub vibration_hz: f32,
+    pub temperature_c: f32,
 }
 
-public system PredictiveMaintenanceEngine {
-    // Evaluates stress indicators to output asset failure risk score
-    public fn evaluate_failure_risk(mut asset: mut MachineAssetHealth) -> f32 {
-        let temp_factor = math_max(0.0, (asset.temperature_c - 70.0) / 30.0);
-        let vib_factor  = math_max(0.0, (asset.vibration_frequency_hz - 120.0) / 80.0);
-        let hour_factor = asset.operating_hours / 10000.0;
+/// A high-performance, fixed-size historical window tracking an individual asset's state over time.
+/// Avoids dynamic memory fragmentation, adhering to strict industrial edge computing requirements.
+pub struct AssetHistoryWindow<const N: usize> {
+    pub history: [TelemetryFrame; N],
+    pub head_idx: usize,
+    pub count: usize,
+    pub total_operating_hours: f32,
+}
 
-        asset.failure_risk_score = math_clamp((temp_factor * 0.4) + (vib_factor * 0.4) + (hour_factor * 0.2), 0.0, 1.0);
-        return asset.failure_risk_score;
+impl<const N: usize> AssetHistoryWindow<N> {
+    pub fn new() -> Self {
+        Self {
+            history: [TelemetryFrame::default(); N],
+            head_idx: 0,
+            count: 0,
+            total_operating_hours: 0.0,
+        }
     }
+
+    /// Appends a fresh sensor telemetry frame into the circular tracking ring window block
+    pub fn append(&mut self, frame: TelemetryFrame, delta_hours: f32) {
+        self.history[self.head_idx] = frame;
+        self.head_idx = (self.head_idx + 1) % N;
+        if self.count < N {
+            self.count += 1;
+        }
+        self.total_operating_hours += delta_hours;
+    }
+}
+
+// ============================================================================
+// 2. THE MULTI-VARIATE ANALYTICS PREDICTIVE ENGINE
+// ============================================================================
+
+pub struct PredictiveMaintenanceEngine;
+
+impl PredictiveMaintenanceEngine {
+    /// UNCHANGING PREDICTIVE ROUTINE (Peak Statistical Anomalous Evaluation)
+    /// Analyzes variance gradients over rolling time windows instead of matching frozen static values.
+    pub fn evaluate_failure_risk<const N: usize>(&self, asset: &AssetHistoryWindow<N>) -> f32 {
+        if asset.count < 2 {
+            return 0.0; // Insufficient temporal depth data to establish variance indicators safely
+        }
+
+        // Step 1: Calculate structural window means
+        let mut sum_temp = 0.0;
+        let mut sum_vib = 0.0;
+        for i in 0..asset.count {
+            sum_temp += asset.history[i].temperature_c;
+            sum_vib += asset.history[i].vibration_hz;
+        }
+        let mean_temp = sum_temp / asset.count as f32;
+        let mean_vib = sum_vib / asset.count as f32;
+
+        // Step 2: Compute statistical Standard Deviation (Sigma Bounds)
+        let mut variance_temp = 0.0;
+        let mut variance_vib = 0.0;
+        for i in 0..asset.count {
+            let diff_t = asset.history[i].temperature_c - mean_temp;
+            let diff_v = asset.history[i].vibration_hz - mean_vib;
+            variance_temp += diff_t * diff_t;
+            variance_vib += diff_v * diff_v;
+        }
+        let std_dev_temp = (variance_temp / asset.count as f32).sqrt().max(0.001);
+        let std_dev_vib = (variance_vib / asset.count as f32).sqrt().max(0.001);
+
+        // Step 3: Analyze the latest incoming element against historical volatility metrics
+        let latest_idx = if asset.head_idx == 0 { N - 1 } else { asset.head_idx - 1 };
+        let latest_frame = &asset.history[latest_idx];
+
+        // Z-Score calculation: Identifies how many standard deviations the latest signal is from the norm
+        let temp_z_score = ((latest_frame.temperature_c - mean_temp) / std_dev_temp).max(0.0);
+        let vib_z_score = ((latest_frame.vibration_hz - mean_vib) / std_dev_vib).max(0.0);
+
+        // Step 4: Scale results alongside cumulative equipment age configurations
+        let z_factor = ((temp_z_score * 0.5) + (vib_z_score * 0.5)) / 3.0; // Scaled relative to a standard 3-sigma anomaly boundary
+        let runtime_wear_factor = asset.total_operating_hours / 24000.0; // Normalized against an industry 24k-hour MTBF metric
+
+        // Blend statistical anomalies (75% weight) with lifetime operational wear (25% weight)
+        (z_factor * 0.75 + runtime_wear_factor * 0.25).clamp(0.0, 1.0)
+    }
+}
+
+// ============================================================================
+// 3. INDUSTRIAL SIMULATION RUNTIME ENVIRONMENT
+// ============================================================================
+
+fn main() {
+    let engine = PredictiveMaintenanceEngine;
+
+    // Allocate an edge history window tracker monitoring the past 8 telemetry read ticks
+    let mut turbine_asset = AssetHistoryWindow::<8>::new();
+
+    // 1. Simulate a machine operating stably inside normal ambient conditions for 7 ticks
+    for _ in 0..7 {
+        turbine_asset.append(TelemetryFrame { vibration_hz: 60.0, temperature_c: 42.0 }, 1.0);
+    }
+
+    let healthy_risk = engine.evaluate_failure_risk(&turbine_asset);
+    println!("--- Industrial Predictive Analytics Monitoring Online ---");
+    println!("Baseline Operational Profile Risk Score: {:.4}", healthy_risk);
+
+    // 2. Simulate an active thermal spike and mechanical friction imbalance on tick 8
+    println!("\n[ALERT]: Anomalous mechanical sensor surge intercepted from Asset PLC channels...");
+    turbine_asset.append(TelemetryFrame { vibration_hz: 195.0, temperature_c: 88.0 }, 1.0);
+
+    // Evaluate risks contextually based on historical baseline shifts
+    let catastrophic_risk = engine.evaluate_failure_risk(&turbine_asset);
+    println!("Recalculated Anomaly Matrix Risk Score: {:.4}", catastrophic_risk);
 }
