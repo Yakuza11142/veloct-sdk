@@ -1,18 +1,95 @@
-module Scientific.Electromagnetics;
+// ============================================================================
+// 1. DATA CORE: HARDWARE-ALIGNED UNIFORM STRUCTS
+// ============================================================================
 
-public system MaxwellFDTDEngine {
-    // Solves 1-step FDTD update for Electric field from Magnetic field curl (Maxwell-Ampere Law)
-    [GPUCompute]
-    public kernel fn update_electric_field(mut e_field: [vec3], h_field: [vec3], permittivity: f32, dt: f32, dx: f32) {
-        let idx = dispatch_thread_id_x();
-        let curl_h = (h_field[idx + 1] - h_field[idx]) / dx;
-        e_field[idx] += curl_h * (dt / permittivity);
+// Memory-aligned to strict 16-byte structural boundaries for modern GPU constant buffers
+struct MaxwellSimulationParams {
+    uint3 grid_dimensions;         // Total cell count across space [DimX, DimY, DimZ]
+    float spatial_step_dx;         // Yee cell grid spacing dimensions in meters (Delta X)
+    float time_step_dt;            // Time increment satisfying Courant stability limits (Delta T)
+    float safe_epsilon;            // Infinity protection threshold factor (e.g., 0.0001)
+    float2 padding;                // Strict hardware structural memory alignment padding
+};
+
+struct GpuYeeCellField {
+    float3 electric_field;         // E_x, E_y, E_z components at cell center
+    float  permittivity;           // Localized dielectric material profile (Epsilon)
+    float3 magnetic_field;         // H_x, H_y, H_z components at staggered grid boundaries
+    float  pml_damping;            // 1.0 inside active field, < 1.0 inside boundary absorption layer
+};
+
+// ============================================================================
+// 2. RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+StructuredBuffer<GpuYeeCellField>   YeeGridInputBuffer  : register(t0); // Current state field matrices
+RWStructuredBuffer<GpuYeeCellField> YeeGridOutputBuffer : register(u0); // Target execution output buffer
+
+// ============================================================================
+// 3. THE PEAK COMPUTE KERNEL: 3D TRANSVERSE PARTIAL CURL SOLVER
+// ============================================================================
+
+/// Flatten 3D spatial coordinates row-major into a 1D index mapping path
+uint compute_gpu_grid_index(uint3 coords, uint3 dimensions) {
+    return coords.x + (coords.y * dimensions.x) + (coords.z * dimensions.x * dimensions.y);
+}
+
+[numthreads(8, 8, 8)] // Optimized 3D Thread Block Group configuration (512 pipeline invocations)
+void ComputeMaxwellFieldKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<MaxwellSimulationParams> config : register(b0)
+) {
+    uint3 cell_coords = dispatch_id.xyz;
+    uint3 grid_dims   = config.grid_dimensions;
+
+    // Safety boundary constraints: prevent unaligned edge memory execution crashes
+    if (cell_coords.x >= grid_dims.x - 1 || cell_coords.y >= grid_dims.y - 1 || cell_coords.z >= grid_dims.z - 1 ||
+        cell_coords.x == 0 || cell_coords.y == 0 || cell_coords.z == 0) {
+        return;
     }
 
-    // Solves Free-Space Path Loss (FSPL) signal power attenuation for 5G/6G millimeter waves
-    public fn compute_path_loss_db(distance_m: f32, frequency_hz: f32, speed_of_light: f32) -> f32 {
-        let wavelength = speed_of_light / frequency_hz;
-        let loss = (4.0 * 3.1415926535 * distance_m) / wavelength;
-        return 20.0 * math_log10(math_max(loss, 0.0001));
-    }
+    // Step 1: Extract current core grid item identifiers
+    uint center_idx = compute_gpu_grid_index(cell_coords, grid_dims);
+    GpuYeeCellField current_cell = YeeGridInputBuffer[center_idx];
+
+    // Step 2: Grab staggered half-step neighbors along primary axes to calculate spatial gradients
+    uint idx_plus_x = compute_gpu_grid_index(cell_coords + uint3(1, 0, 0), grid_dims);
+    uint idx_plus_y = compute_gpu_grid_index(cell_coords + uint3(0, 1, 0), grid_dims);
+    uint idx_plus_z = compute_gpu_grid_index(cell_coords + uint3(0, 0, 1), grid_dims);
+
+    GpuYeeCellField cell_next_x = YeeGridInputBuffer[idx_plus_x];
+    GpuYeeCellField cell_next_y = YeeGridInputBuffer[idx_plus_y];
+    GpuYeeCellField cell_next_z = YeeGridInputBuffer[idx_plus_z];
+
+    // Step 3: Compute mathematically precise 3D partial spatial curl steps branchlessly
+    // Evaluates True Curl: $\nabla \times \mathbf{H}$ across all three axes simultaneously
+    float3 curl_h;
+    
+    // Curl X = dHz/dy - dHy/dz
+    curl_h.x = ((cell_next_y.magnetic_field.z - current_cell.magnetic_field.z) - 
+                (cell_next_z.magnetic_field.y - current_cell.magnetic_field.y)) / config.spatial_step_dx;
+                
+    // Curl Y = dHx/dz - dHz/dx
+    curl_h.y = ((cell_next_z.magnetic_field.x - current_cell.magnetic_field.x) - 
+                (cell_next_x.magnetic_field.z - current_cell.magnetic_field.z)) / config.spatial_step_dx;
+                
+    // Curl Z = dHy/dx - dHx/dy
+    curl_h.z = ((cell_next_x.magnetic_field.y - current_cell.magnetic_field.y) - 
+                (cell_next_y.magnetic_field.x - current_cell.magnetic_field.x)) / config.spatial_step_dx;
+
+    // Step 4: Compute Electric Field updates weighted inversely by local material permittivity
+    // $\mathbf{E}^{n+1} = \mathbf{E}^n + \frac{\Delta t}{\epsilon} (\nabla \times \mathbf{H})$
+    float3 delta_electric_field = curl_h * (config.time_step_dt / max(config.safe_epsilon, current_cell.permittivity));
+    float3 updated_electric_field = current_cell.electric_field + delta_electric_field;
+
+    // Step 5: Apply physical boundary layer damping (PML attenuation) to absorb outbound waveforms branchlessly
+    updated_electric_field *= current_cell.pml_damping;
+
+    // Step 6: Flush calculations straight back to output VRAM storage buffers
+    YeeGridOutputBuffer[center_idx].electric_field = updated_electric_field;
+    
+    // Retain baseline static tracking attributes across frames
+    YeeGridOutputBuffer[center_idx].magnetic_field = current_cell.magnetic_field;
+    YeeGridOutputBuffer[center_idx].permittivity   = current_cell.permittivity;
+    YeeGridOutputBuffer[center_idx].pml_damping    = current_cell.pml_damping;
 }
