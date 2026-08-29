@@ -1,10 +1,88 @@
-module Graphics.Atmosphere;
+// ============================================================================
+// 1. DATA CORE: PHYSICALLY-BASED RENDERING CONFIGURATION CONSTANTS
+// ============================================================================
 
-[GPUCompute]
-public kernel fn compute_sky_scattering(mut sky_map: [vec4], sun_dir: vec3) {
-    let idx = dispatch_thread_id_x();
-    let ray_dir = vec3_from_index(idx);
-    let dot_sun = math_dot(ray_dir, sun_dir);
-    let Rayleigh = 0.0025 * (1.0 + dot_sun * dot_sun);
-    sky_map[idx] = vec4(0.1 + Rayleigh, 0.3 + Rayleigh, 0.8 + Rayleigh, 1.0);
+// Aligned to constant buffer layout rules for modern graphics pipelines
+struct AtmosphereParameters {
+    float3 wave_lengths;         // Wavelengths of light (e.g., RGB: Red=680nm, Green=550nm, Blue=440nm)
+    float  planet_radius;        // Radius of the planet body (e.g., 6360km)
+    float3 rayleigh_coefficients;// Base Rayleigh scattering coefficients per wavelength
+    float  atmosphere_radius;    // Boundary edge of the air mass sphere (e.g., 6420km)
+    float  rayleigh_scale_height;// Thickness of the atmosphere layer (e.g., 8km scale)
+    int    sample_count;         // Ray-marching integration step steps
+};
+
+// ============================================================================
+// 2. THE PEAK GPU COMPUTE ATMOSPHERIC SOLVER
+// ============================================================================
+
+Texture2D<float4> SkyRenderTarget : register(u0);
+
+// Helper function to resolve ray-sphere intersection points
+bool intersect_atmosphere(float3 ray_origin, float3 ray_dir, float rad, out float t0, out float t1) {
+    float b = dot(ray_origin, ray_dir);
+    float c = dot(ray_origin, ray_origin) - (rad * rad);
+    float d = (b * b) - c;
+    if (d < 0.0) return false;
+    float sqrt_d = sqrt(d);
+    t0 = -b - sqrt_d;
+    t1 = -b + sqrt_d;
+    return true;
+}
+
+[numthreads(64, 1, 1)]
+void ComputeSkyScatteringKernel(uint3 dispatch_id : SV_DispatchThreadID, ConstantBuffer<AtmosphereParameters> config : register(b0)) {
+    uint idx = dispatch_id.x;
+    
+    // Convert 1D thread ID into an absolute 3D viewing ray projection vector
+    float3 ray_dir = vec3_from_index(idx); 
+    float3 sun_dir = normalize(GetSunDirection());
+    float3 camera_pos = float3(0.0, config.planet_radius + 1.0, 0.0); // Viewer stands slightly above ground level
+
+    // Step 1: Trace boundaries to find the atmospheric entry and exit distances
+    float t0, t1;
+    if (!intersect_atmosphere(camera_pos, ray_dir, config.atmosphere_radius, t0, t1) || t1 < 0.0) {
+        SkyRenderTarget[uint2(idx, 0)] = float4(0.0, 0.0, 0.0, 1.0); // Space void fallback
+        return;
+    }
+    t0 = max(t0, 0.0); // Prevent back-tracing artifacts behind the viewer
+
+    // Step 2: Numerical Integration (Ray-Marching through the atmosphere volume)
+    float  step_length = (t1 - t0) / (float)config.sample_count;
+    float  current_t = t0;
+    
+    float3 total_rayleigh_scattering = float3(0.0, 0.0, 0.0);
+    float  accumulated_optical_depth = 0.0;
+
+    for (int i = 0; i < config.sample_count; i++) {
+        float3 sample_pos = camera_pos + ray_dir * (current_t + step_length * 0.5);
+        float  sample_height = length(sample_pos) - config.planet_radius;
+
+        // Compute local air density using the exponential barometric distribution formula
+        float density = exp(-sample_height / config.rayleigh_scale_height);
+        accumulated_optical_depth += density * step_length;
+
+        // Step 3: Compute Out-Scattering Transmittance toward the Sun (Beer's Law)
+        float s0, s1;
+        intersect_atmosphere(sample_pos, sun_dir, config.atmosphere_radius, s0, s1);
+        float3 sun_optical_depth = exp(-config.rayleigh_coefficients * (s1 * density));
+
+        // Aggregate scattered light contribution reaching this point in space
+        float3 viewing_transmittance = exp(-config.rayleigh_coefficients * accumulated_optical_depth);
+        total_rayleigh_scattering += density * viewing_transmittance * sun_optical_depth * step_length;
+
+        current_t += step_length;
+    }
+
+    // Step 4: Apply Rayleigh Phase Function alignment factor ($\frac{3}{16\pi} \cdot (1 + \cos^2(\theta))$)
+    float mu = dot(ray_dir, sun_dir);
+    float phase_rayleigh = (3.0 / (16.0 * 3.14159265)) * (1.0 + mu * mu);
+
+    // Final color grading profile calculation output
+    float3 final_sky_color = total_rayleigh_scattering * config.rayleigh_coefficients * phase_rayleigh;
+
+    // Apply high-dynamic range exposure tone-mapping before writing to the output buffer
+    final_sky_color = 1.0 - exp(-1.5 * final_sky_color);
+
+    SkyRenderTarget[uint2(idx, 0)] = float4(final_sky_color, 1.0);
 }
