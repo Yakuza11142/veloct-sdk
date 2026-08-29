@@ -1,8 +1,79 @@
-module ICVFX.Color;
+// ============================================================================
+// 1. DATA CORE: MEMORY-ALIGNED COLOR PROJECTION MATRIX
+// ============================================================================
 
-public fn linear_to_aces_cg(linear_color: vec3) -> vec3 {
-    let r = linear_color.r * 0.6131 + linear_color.g * 0.3395 + linear_color.b * 0.0474;
-    let g = linear_color.r * 0.0701 + linear_color.g * 0.9164 + linear_color.b * 0.0135;
-    let b = linear_color.r * 0.0206 + linear_color.g * 0.1096 + linear_color.b * 0.8698;
-    return vec3(r, g, b);
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics APIs (DX12 / Vulkan)
+struct ColorSpaceParameters {
+    float3x3 color_transform_matrix; // Arbitrary input-to-output conversion matrix (e.g., Linear -> ACEScg)
+    float3   chromatic_biases;       // Offset coefficients for dark channel correction
+    float    target_exposure;        // Master linear exposure scalar multiplier
+};
+
+// ============================================================================
+// 2. RESOURCE INPUT/OUTPUT INTERFACES
+// ============================================================================
+
+Texture2D<float4>   SourceTexture : register(t0); // Raw linear/log camera intake texture
+RWTexture2D<float4> OutputTexture : register(u0); // Transformed wide-gamut destination texture
+
+// ============================================================================
+// 3. PHYSICALLY-BASED TRANSFORMATION LOGIC
+// ============================================================================
+
+/// ACEScct Non-Linear Logarithmic Transformation Curve.
+/// Safely compresses high-dynamic-range highlights to preserve sensor information in dark grades.
+float3 apply_aces_cct_transfer_curve(float3 linear_color) {
+    const float ACES_MIN_LOG = -6.5;
+    const float ACES_MAX_LOG = 25.0;
+
+    // Mathematical boundary constraints for standard ACEScct grading layouts
+    float3 is_above_cutoff = step(0.0078125, linear_color);
+    
+    // Evaluation Branch A: Logarithmic curve equation for bright exposures
+    float3 log_curve = (log2(linear_color) - ACES_MIN_LOG) / (ACES_MAX_LOG - ACES_MIN_LOG);
+    
+    // Evaluation Branch B: Linear extension for low-light noise floor values
+    float3 linear_tail = 10.54023774 * linear_color + 0.07290553419;
+
+    // Branchless Vector Selection Matrix via lerp and step functions
+    return lerp(linear_tail, log_curve, is_above_cutoff);
+}
+
+// ============================================================================
+// 4. THE UNIFIED COMPLIANT SHADER ENGINE EXECUTOR
+// ============================================================================
+
+[numthreads(16, 16, 1)]
+void ExecuteICVFXColorPipeline(
+    uint3 dispatch_id : SV_DispatchThreadID, 
+    ConstantBuffer<ColorSpaceParameters> config : register(b0)
+) {
+    uint2 target_pixel = dispatch_id.xy;
+    
+    uint2 texture_dimensions;
+    SourceTexture.GetDimensions(texture_dimensions.x, texture_dimensions.y);
+    
+    if (target_pixel.x >= texture_dimensions.x || target_pixel.y >= texture_dimensions.y) {
+        return;
+    }
+
+    // Step 1: Extract the raw high-dynamic-range pixel color vector
+    float4 raw_sample = SourceTexture[target_pixel];
+    float3 rgb = raw_sample.rgb;
+
+    // Step 2: Apply physical linear exposure adjustments
+    rgb *= config.target_exposure;
+
+    // Step 3: Perform direct vector-matrix multiplication at the hardware layer
+    // Completely replaces scalar row equations with a single parallel instruction
+    float3 transformed_color = mul(config.color_transform_matrix, rgb);
+
+    // Step 4: Apply chromatic offsets and channel constraints branchlessly
+    transformed_color = max(float3(0.0, 0.0, 0.0), transformed_color + config.chromatic_biases);
+
+    // Step 5: Compress linear fields into non-linear ACEScct cinematic curves
+    float3 final_cinematic_output = apply_aces_cct_transfer_curve(transformed_color);
+
+    // Commit final multi-channel frame data directly to the hardware display buffers
+    OutputTexture[target_pixel] = float4(final_cinematic_output, raw_sample.a);
 }
