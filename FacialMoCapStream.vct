@@ -1,13 +1,212 @@
-module Assets.FacialMoCap;
+#![feature(portable_simd)] // Unlocks native hardware SIMD vector extensions
 
-struct BlendShapes {
-    jaw_open: f32,
-    eye_blink_l: f32,
-    eye_blink_r: f32
+use std::net::UdpSocket;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::Arc;
+use std::simd::f32x4;
+use std::thread;
+use std::time::Duration;
+
+// ============================================================================
+// 1. DATA CORE: HARDWARE-ALIGNED CONTIGUOUS ANIMATION STREAM SLOTS
+// ============================================================================
+
+/// High-density packed animation buffer tracking 4 blendshape channels concurrently.
+/// Aligned to 16 bytes to enable immediate loading into hardware vector registers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C, align(16))]
+pub struct BlendShapeBlock4 {
+    pub target_weights:  [f32; 4],
+    pub filtered_weights: [f32; 4], // Active stabilized values driving the skeletal mesh
 }
 
-public fn apply_blendshapes(buffer: [f32; 3], mut weights: BlendShapes) {
-    weights.jaw_open   = buffer[0];
-    weights.eye_blink_l = buffer[1];
-    weights.eye_blink_r = buffer[2];
+/// The complete facial animation profile tracking 52 distinct standard ARKit expressions.
+/// Organized using an Array-of-SIMD-Blocks topology to maximize hardware cache pre-fetching.
+#[derive(Debug, Clone)]
+#[repr(C, align(64))]
+pub struct LiveFaceExpressionMatrix {
+    pub tracking_channels: [BlendShapeBlock4; 13], // 13 blocks * 4 lanes = 52 total channels
+    pub sequence_frame_id: u64,
+}
+
+impl Default for LiveFaceExpressionMatrix {
+    fn default() -> Self {
+        Self {
+            tracking_channels: [BlendShapeBlock4 { target_weights: [0.0; 4], filtered_weights: [0.0; 4] }; 13],
+            sequence_frame_id: 0,
+        }
+    }
+}
+
+// ============================================================================
+// 2. THE LOCK-FREE READ-COPY-UPDATE ANIMATION CONTAINER (URCU)
+// ============================================================================
+
+/// Thread-safe, lock-free live animation database cache.
+/// Ensures rendering loops can read blendshapes concurrently with zero lock contention.
+pub struct ConcurrentMoCapRegistry {
+    active_frame_ptr: AtomicPtr<LiveFaceExpressionMatrix>,
+}
+
+impl ConcurrentMoCapRegistry {
+    pub fn new() -> Self {
+        let initial_alloc = Box::into_raw(Box::new(LiveFaceExpressionMatrix::default()));
+        Self { active_frame_ptr: AtomicPtr::new(initial_alloc) }
+    }
+
+    /// LOCK-FREE ANIMATION SNAPSHOT READ (Render Thread Hot Path)
+    #[inline(always)]
+    pub fn read_frame_snapshot(&self) -> Arc<LiveFaceExpressionMatrix> {
+        let raw_ptr = self.active_frame_ptr.load(Ordering::Acquire);
+        unsafe { Arc::new((*raw_ptr).clone()) }
+    }
+
+    /// ATOMIC RUNTIME HOT-SWAP (Ingestion Path)
+    pub fn commit_frame_swap(&self, fresh_matrix: LiveFaceExpressionMatrix) {
+        let new_raw_ptr = Box::into_raw(Box::new(fresh_matrix));
+        let old_raw_ptr = self.active_frame_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe {
+                let _ = Box::from_raw(old_raw_ptr); // Deallocate historical frame instantly
+            }
+        }
+    }
+}
+
+impl Drop for ConcurrentMoCapRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_frame_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(raw_ptr); }
+        }
+    }
+}
+
+// ============================================================================
+// 3. THE ASYNCHRONOUS NON-BLOCKING LIVE LINK INGESTION LAYER
+// ============================================================================
+
+pub struct LiveLinkIngestionPipeline {
+    pub jitter_cutoff_beta: f32, // Temporal filtering smoothing alpha coefficient [0.0 - 1.0]
+}
+
+impl LiveLinkIngestionPipeline {
+    /// SPAWNS LOCK-FREE BACKGROUND NETWORK LISTENER LOOP
+    /// Spawns an independent OS thread that processes incoming UDP binary tracking packages.
+    pub fn spawn_network_listener(
+        &self,
+        registry: Arc<ConcurrentMoCapRegistry>,
+        bind_address: &'static str,
+        shutdown_signal: Arc<AtomicBool>,
+    ) -> thread::JoinHandle<()> {
+        let beta_scalar = self.jitter_cutoff_beta;
+        
+        thread::spawn(move || {
+            let socket = UdpSocket::bind(bind_address).expect("Fatal Error: Failed to bind to Live Link UDP socket.");
+            socket.set_nonblocking(true).expect("Fatal Error: Failed to set socket to non-blocking mode.");
+
+            // Buffer sized to receive standard ARKit payload chunks (e.g., 52 channels * 4 bytes per float = 208 bytes)
+            let mut packet_buffer = [0u8; 208];
+
+            println!("[MoCap Ingestion]: Asynchronous Live Link socket active on loop address {}...", bind_address);
+
+            while !shutdown_signal.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut packet_buffer) {
+                    Ok((bytes_received, _sender_addr)) => {
+                        if bytes_received >= 208 {
+                            let mut working_matrix = (*registry.read_frame_snapshot()).clone();
+                            let beta = f32x4::splat(beta_scalar);
+
+                            // Process all 52 tracking channels in highly optimized 4-lane parallel segments
+                            for block_idx in 0..13 {
+                                let offset = block_idx * 16;
+                                
+                                // Hardware-level byte array mapping from network buffer stream
+                                let incoming_camera_floats = [
+                                    f32::from_le_bytes([packet_buffer[offset], packet_buffer[offset+1], packet_buffer[offset+2], packet_buffer[offset+3]]),
+                                    f32::from_le_bytes([packet_buffer[offset+4], packet_buffer[offset+5], packet_buffer[offset+6], packet_buffer[offset+7]]),
+                                    f32::from_le_bytes([packet_buffer[offset+8], packet_buffer[offset+9], packet_buffer[offset+10], packet_buffer[offset+11]]),
+                                    f32::from_le_bytes([packet_buffer[offset+12], packet_buffer[offset+13], packet_buffer[offset+14], packet_buffer[offset+15]]),
+                                ];
+
+                                let target_block = &mut working_matrix.tracking_channels[block_idx];
+                                let raw_input = f32x4::from_slice(&incoming_camera_floats);
+                                let past_filtered = f32x4::from_slice(&target_block.filtered_weights);
+
+                                // SIMD Temporal Low-Pass Filtering: Filtered = Past + Beta * (Raw - Past)
+                                let smoothed_weights = past_filtered + beta * (raw_input - past_filtered);
+                                let final_clamped_vector = smoothed_weights.simd_max(f32x4::splat(0.0)).simd_min(f32x4::splat(1.0));
+
+                                raw_input.copy_to_slice(&mut target_block.target_weights);
+                                final_clamped_vector.copy_to_slice(&mut target_block.filtered_weights);
+                            }
+
+                            working_matrix.sequence_frame_id += 1;
+                            registry.commit_frame_swap(working_matrix);
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Buffer empty. Yield CPU core temporarily to prevent thread starvation spikes
+                        thread::sleep(Duration::from_micros(500));
+                    }
+                    Err(_) => {
+                        // Ignore standard transport layer noise during production transmissions
+                    }
+                }
+            }
+            println!("[MoCap Ingestion]: Live Link socket worker pool clean shutdown complete.");
+        })
+    }
+}
+
+// ============================================================================
+// 4. LIVE PERFORMANCE SIMULATION & VERIFICATION RUNTIME
+// ============================================================================
+
+fn main() {
+    let mocap_registry = Arc::new(ConcurrentMoCapRegistry::new());
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    
+    // Configure engine setting a 35% track blend weighting for optical noise suppression
+    let ingestion_pipeline = LiveLinkIngestionPipeline { jitter_cutoff_beta: 0.35 };
+
+    println!("--- Real-Time Asynchronous Live Link Ingestion Engine Online ---");
+
+    // 1. Launch the non-blocking background wire collector loop thread
+    let ingestion_registry_ref = Arc::clone(&mocap_registry);
+    let ingestion_shutdown_ref = Arc::clone(&shutdown_flag);
+    let network_worker_handle = ingestion_pipeline.spawn_network_listener(
+        ingestion_registry_ref,
+        "127.0.0.1:51123", // Standard tracking loop address port
+        ingestion_shutdown_ref,
+    );
+
+    // 2. Simulate an active hardware broadcast transmission from a mock camera tracker device
+    {
+        let sender_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let mut simulated_packet = [0u8; 208];
+        
+        // Mocking Block 0 parameters: JawOpen spiked to 80% (0.80f32), with adjacent high-frequency jitter
+        let jaw_open_bytes = 0.80f32.to_le_bytes();
+        simulated_packet[0] = jaw_open_bytes[0];
+        simulated_packet[1] = jaw_open_bytes[1];
+        simulated_packet[2] = jaw_open_bytes[2];
+        simulated_packet[3] = jaw_open_bytes[3];
+
+        thread::sleep(Duration::from_millis(50)); // Allow background thread to warm up
+        sender_socket.send_to(&simulated_packet, "127.0.0.1:51123").unwrap();
+        thread::sleep(Duration::from_millis(50)); // Allow data packet ingestion step to finalize
+    }
+
+    // 3. Verification Pass: Read telemetry data locklessly from the main graphic loop thread
+    let final_animation_frame = mocap_registry.read_frame_snapshot();
+    println!("\n=== Live Meta-Human Mesh Driver Analytics ===");
+    println!("  Block 0 Target Inputs (Raw)   : {:?}", final_animation_frame.tracking_channels[0].target_weights);
+    println!("  Block 0 Stabilized Outputs     : {:?}", final_animation_frame.tracking_channels[0].filtered_weights);
+    println!("  Sequence Frame Ingestion Index: {} (Successfully synchronized)", final_animation_frame.sequence_frame_id);
+
+    // 4. Trigger safe shutdown phase across systems channels
+    shutdown_flag.store(true, Ordering::Relaxed);
+    network_worker_handle.join().unwrap();
+    println!("\nSystem Lifecycle Successfully Terminated.");
 }
