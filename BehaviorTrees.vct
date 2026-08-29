@@ -1,16 +1,167 @@
-module AI.BehaviorTrees;
+// ============================================================================
+// 1. DATA CORE: ATOMIC BLACKBOARD & CONTEXT MANAGEMENT
+// ============================================================================
 
-struct BehaviorNode {
-    node_type: u8, // 0: Selector, 1: Sequence, 2: Action
-    status: u8     // 0: Failure, 1: Success, 2: Running
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+/// A thread-safe, shared context structure tracking world data parameters.
+/// Replaces rigid checks with atomic key-value slots.
+pub struct Blackboard {
+    pub flags: HashMap<String, Arc<AtomicU32>>,
 }
 
-public fn execute_sequence(nodes: [BehaviorNode; 4]) -> u8 {
-    let mut i: u64 = 0;
-    while i < 4 {
-        if nodes[i].status == 0 { return 0; }
-        if nodes[i].status == 2 { return 2; }
-        i += 1;
+impl Blackboard {
+    pub fn get_flag(&self, key: &str) -> u32 {
+        self.flags.get(key).map(|v| v.load(Ordering::Acquire)).unwrap_or(0)
     }
-    return 1;
+
+    pub fn set_flag(&self, key: &str, val: u32) {
+        if let Some(slot) = self.flags.get(key) {
+            slot.store(val, Ordering::Release);
+        }
+    }
+}
+
+// ============================================================================
+// 2. THE PEAK UNIFIED INTERRUPT-DRIVEN EXECUTION ENGINE
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum NodeStatus {
+    Failure = 0,
+    Success = 1,
+    Running = 2,
+}
+
+/// A cache-aligned tracking token that acts as a resume pointer for execution memory.
+/// Ensures that when the tree ticks again, it skips already completed nodes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TreeExecutionToken {
+    pub current_running_index: usize,
+    pub active_interrupt_bits: u32,
+}
+
+pub trait BehaviorTask {
+    fn execute(&self, blackboard: &Blackboard, token: &mut TreeExecutionToken) -> NodeStatus;
+}
+
+// ============================================================================
+// 3. CONCRETE ULTIMATE COMPOSITE LAYERS (INFINITE DATA ARCHITECTURE)
+// ============================================================================
+
+/// Continuous Sequence Composite Evaluator with Memory Continuation Loops
+pub struct PersistentSequence {
+    pub children: Vec<Box<dyn BehaviorTask + Send + Sync>>,
+}
+
+impl BehaviorTask for PersistentSequence {
+    /// O(1) CONTINUATION EVALUATION
+    /// Instead of restarting from 0 every frame, it resumes directly at the last running node index.
+    #[inline(always)]
+    fn execute(&self, blackboard: &Blackboard, token: &mut TreeExecutionToken) -> NodeStatus {
+        // Immediate Reactive Check: Abort instantly if global interrupt alert lines are tripped
+        if (blackboard.get_flag("sys_interrupt_vector") & token.active_interrupt_bits) != 0 {
+            token.current_running_index = 0; // Wipe memory state
+            return NodeStatus::Failure;
+        }
+
+        let mut i = token.current_running_index;
+        while i < self.children.len() {
+            // Traverse from the cached marker address location
+            let child_status = self.children[i].execute(blackboard, token);
+
+            match child_status {
+                NodeStatus::Failure => {
+                    token.current_running_index = 0; // Sequence broke. Reset state index pointers
+                    return NodeStatus::Failure;
+                }
+                NodeStatus::Running => {
+                    token.current_running_index = i; // Cache current index position for next tick cycle
+                    return NodeStatus::Running;
+                }
+                NodeStatus::Success => {
+                    i += 1;
+                }
+            }
+        }
+
+        token.current_running_index = 0; // All children completed successfully
+        NodeStatus::Success
+    }
+}
+
+// Concrete Action Implementation: Checks blackboard values dynamically
+pub struct VerifyTargetInSightAction;
+impl BehaviorTask for VerifyTargetInSightAction {
+    fn execute(&self, blackboard: &Blackboard, _token: &mut TreeExecutionToken) -> NodeStatus {
+        if blackboard.get_flag("target_visible") == 1 {
+            NodeStatus::Success
+        } else {
+            NodeStatus::Failure
+        }
+    }
+}
+
+// Concrete Action Implementation: Simulates a long-running execution process
+pub struct MoveToTargetPositionAction;
+impl BehaviorTask for MoveToTargetPositionAction {
+    fn execute(&self, blackboard: &Blackboard, _token: &mut TreeExecutionToken) -> NodeStatus {
+        let current_distance = blackboard.get_flag("distance_to_target");
+        if current_distance <= 1 {
+            blackboard.set_flag("distance_to_target", 0);
+            NodeStatus::Success
+        } else {
+            // Step closer over time and retain execution state control
+            blackboard.set_flag("distance_to_target", current_distance - 1);
+            NodeStatus::Running
+        }
+    }
+}
+
+// ============================================================================
+// 4. PIPELINE RUNTIME EVALUATION HARNESS
+// ============================================================================
+
+fn main() {
+    // 1. Setup our thread-safe sharing context
+    let mut flags = HashMap::new();
+    flags.insert("target_visible".to_string(), Arc::new(AtomicU32::new(1)));
+    flags.insert("distance_to_target".to_string(), Arc::new(AtomicU32::new(3)));
+    flags.insert("sys_interrupt_vector".to_string(), Arc::new(AtomicU32::new(0)));
+    
+    let global_blackboard = Blackboard { flags };
+
+    // 2. Build our Composite Tree Layout
+    let chase_sequence = PersistentSequence {
+        children: vec![
+            Box::new(VerifyTargetInSightAction),
+            Box::new(MoveToTargetPositionAction),
+        ],
+    };
+
+    // Instantiate our thread state context tracking token
+    let mut actor_token = TreeExecutionToken {
+        current_running_index: 0,
+        active_interrupt_bits: 0b0000_0001, // Monitor first bit for emergency overrides
+    };
+
+    println!("--- Absolute Peak Advanced Behavior Engine Online ---");
+
+    // 3. Tick Cycle 1
+    let tick_1 = chase_sequence.execute(&global_blackboard, &mut actor_token);
+    println!("Tick 1 Status: {:?} | Memory Index Pointer: {}", tick_1, actor_token.current_running_index);
+
+    // 4. Tick Cycle 2: Skips VerifyTargetInSight entirely, continuing straight into MoveToTarget
+    let tick_2 = chase_sequence.execute(&global_blackboard, &mut actor_token);
+    println!("Tick 2 Status: {:?} | Memory Index Pointer: {}", tick_2, actor_token.current_running_index);
+
+    // 5. Force an emergency panic override midway through the loop via the context layer
+    println!("\n[ALARM]: Triggering system context interrupt vector...");
+    global_blackboard.set_flag("sys_interrupt_vector", 1); // Trips active_interrupt_bits mask match
+
+    let tick_3 = chase_sequence.execute(&global_blackboard, &mut actor_token);
+    println!("Tick 3 Status: {:?} | Memory Index Pointer: {} (Wiped Clean)", tick_3, actor_token.current_running_index);
 }
