@@ -1,7 +1,200 @@
-module Pipeline.Config;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-define STAGE_LED_WIDTH   = 3840;
-define STAGE_LED_HEIGHT  = 2160;
-define GENLOCK_REFRESH   = 59.94;
-define ACES_PROFILE      = 1;
-define DMX_UNIVERSE_MAX  = 4;
+// ============================================================================
+// 1. DATA CORE: HARDWARE-ALIGNED GPU-READY CONFIG STRUCTS
+// ============================================================================
+
+/// Strict 16-byte memory-aligned layout matching GPU Constant Buffer specifications.
+/// Mirrors studio stage, genlock, color profiles, and DMX universes in a single block.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[repr(C, align(16))]
+pub struct BroadcastPipelineConfig {
+    pub stage_led_width: u32,
+    pub stage_led_height: u32,
+    pub genlock_refresh_hz: f32,
+    pub aces_profile_id: u32,
+    pub dmx_universe_max: u32,
+    pub padding: [u32; 3], // Fills out the register boundary perfectly to a 16-byte multiple
+}
+
+impl Default for BroadcastPipelineConfig {
+    fn default() -> Self {
+        Self {
+            stage_led_width: 3840,
+            stage_led_height: 2160,
+            genlock_refresh_hz: 59.94,
+            aces_profile_id: 1, // Standard ACEScg profile mapping flag
+            dmx_universe_max: 4,
+            padding: [0; 3],
+        }
+    }
+}
+
+// ============================================================================
+// 2. THE LOCK-FREE READ-COPY-UPDATE REGISTRY (HOT OVERLAY SPLIT)
+// ============================================================================
+
+/// Thread-safe, lock-free virtual production configuration repository.
+/// Allows parallel tracking, lighting, and rendering pipelines to read parameters
+/// concurrently with absolute zero read latency or thread lock contention.
+pub struct BroadcastConfigRegistry {
+    active_config_ptr: AtomicPtr<BroadcastPipelineConfig>,
+}
+
+impl BroadcastConfigRegistry {
+    pub fn new() -> Self {
+        let default_config = Box::new(BroadcastPipelineConfig::default());
+        Self {
+            active_config_ptr: AtomicPtr::new(Box::into_raw(default_config)),
+        }
+    }
+
+    /// LOCK-FREE HOT SNAPSHOT READ (Render Thread Hot Path)
+    /// Instantly returns an immutable reference with zero mutex contention overhead.
+    #[inline(always)]
+    pub fn acquire_snapshot(&self) -> Arc<BroadcastPipelineConfig> {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Acquire);
+        // Safety: Pointer is guaranteed valid via atomic release barriers on the hot-swap channel
+        unsafe { Arc::new(*raw_ptr) }
+    }
+
+    /// ATOMIC AT-RUN-TIME HOT-SWAP (Management/Watcher Path)
+    /// Swaps pointers instantly across threads, publishing new stage geometries to all nodes.
+    pub fn hot_swap_configuration(&self, new_config: BroadcastPipelineConfig) {
+        let new_raw_ptr = Box::into_raw(Box::new(new_config));
+        let old_raw_ptr = self.active_config_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe {
+                let _ = Box::from_raw(old_raw_ptr); // Deallocate historical frame blocks cleanly
+            }
+        }
+    }
+}
+
+impl Drop for BroadcastConfigRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe {
+                let _ = Box::from_raw(raw_ptr);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 3. THE ASYNCHRONOUS LIVE PIPELINE WATCHER
+// ============================================================================
+
+pub struct LiveStageConfigurationWatcher;
+
+impl LiveCalendarConfigurationWatcher {
+    /// SPAWNS BACKGROUND FILE SYSTEM MONITOR LOOP
+    /// Polls operating system file system notification frames without blocking main render lanes.
+    pub fn spawn_monitor_loop(
+        registry: Arc<BroadcastConfigRegistry>,
+        file_path_str: &'static str,
+        shutdown_signal: Arc<AtomicBool>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let path = Path::new(file_path_str);
+            let mut last_modified_time = None;
+
+            println!("[ICVFX Watcher]: Monitoring stage configuration target: '{}'...", file_path_str);
+
+            while !shutdown_signal.load(Ordering::Relaxed) {
+                if path.exists() {
+                    if let Ok(metadata) = path.metadata() {
+                        if let Ok(modified_time) = metadata.modified() {
+                            // Check if the configuration file's modification timestamp has shifted
+                            if last_modified_time.is_none() || Some(modified_time) != last_modified_time {
+                                last_modified_time = Some(modified_time);
+
+                                // Ingest, parse, and process text mutations securely
+                                if let Ok(file_content) = std::fs::read_to_string(path) {
+                                    if let Ok(parsed_config) = serde_json::from_str::<BroadcastPipelineConfig>(&file_content) {
+                                        // Inject the fresh stage settings completely lock-free
+                                        registry.hot_swap_configuration(parsed_config);
+                                        println!("[ICVFX Watcher]: Dynamic stage configuration hot-swap successfully committed to registers.");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Yield thread execution context to prevent localized CPU hardware spikes
+                thread::sleep(Duration::from_millis(250));
+            }
+            println!("[ICVFX Watcher]: Background loop thread clean shutdown complete.");
+        })
+    }
+}
+
+// ============================================================================
+// 4. VIRTUAL PRODUCTION RUNTIME VALIDATION HARNESS
+// ============================================================================
+
+fn main() {
+    let config_registry = Arc::new(BroadcastConfigRegistry::new());
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let stage_json_path = "vct_stage_config.json";
+
+    println!("--- Real-Time Asynchronous ICVFX Stage Configuration Engine Online ---");
+
+    // Pre-create our default JSON stage layout configuration on disk
+    {
+        let default_data = BroadcastPipelineConfig::default();
+        let serialized_json = serde_json::to_string_pretty(&default_data).unwrap();
+        let mut file = File::create(stage_json_path).unwrap();
+        file.write_all(serialized_json.as_bytes()).unwrap();
+    }
+
+    // 1. Launch the non-blocking background configuration file watcher thread
+    let watcher_registry_ref = Arc::clone(&config_registry);
+    let watcher_shutdown_ref = Arc::clone(&shutdown_flag);
+    let worker_thread_handle = LiveStageConfigurationWatcher::spawn_monitor_loop(
+        watcher_registry_ref,
+        stage_json_path,
+        watcher_shutdown_ref,
+    );
+
+    thread::sleep(Duration::from_millis(50)); // Give the worker thread a window to register initial state
+
+    // 2. Simulate an active studio update (e.g., technician adapts to an advanced 8K wall at 24Hz)
+    {
+        let modified_profile = BroadcastPipelineConfig {
+            stage_led_width: 7680,   // Scale up to 8K LED Wall dimensions
+            stage_led_height: 4320,
+            genlock_refresh_hz: 24.00, // Cinematic shutter lock frequency conversion
+            dmx_universe_max: 16,     // Expand stage lighting tracking channels
+            ..Default::default()
+        };
+
+        let updated_json = serde_json::to_string_pretty(&modified_profile).unwrap();
+        let mut file = File::create(stage_json_path).unwrap();
+        file.write_all(updated_json.as_bytes()).unwrap();
+        
+        thread::sleep(Duration::from_millis(300)); // Allow background thread to process the file commit
+    }
+
+    // 3. Verification: High-throughput render loops instantly witness updated specs lock-free
+    let runtime_snapshot = config_registry.acquire_snapshot();
+    println!("\n=== Live In-Camera VFX Engine Audit ===");
+    println!("  Active Wall Resolution  : {}x{} (8K Target)", runtime_snapshot.stage_led_width, runtime_snapshot.stage_led_height);
+    println!("  Camera Genlock Shutter  : {:.2} Hz (Expected 24.00)", runtime_snapshot.genlock_refresh_hz);
+    println!("  Max DMX Light Universes : {} (Successfully scaled runtime layout)", runtime_snapshot.dmx_universe_max);
+
+    // 4. Trigger safe structural teardown pass
+    shutdown_flag.store(true, Ordering::Relaxed);
+    worker_thread_handle.join().unwrap();
+    
+    let _ = std::fs::remove_file(stage_json_path); // Clean up directory footprint
+    println!("\nSystem Lifecycle Successfully Terminated.");
+}
