@@ -1,17 +1,196 @@
-module AEC.Config;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-struct ProjectTwinConfig {
-    project_id: u64,
-    origin_latitude: f64,
-    origin_longitude: f64,
-    update_rate_hz: f32
+// ============================================================================
+// 1. DATA CORE: PACKED MEMORY CHUNKS
+// ============================================================================
+
+/// The underlying structural configuration containing high-precision spatial anchors.
+/// Derives Serde traits to enable automated text file deserialization pipelines.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ProjectTwinConfig {
+    pub project_id: u64,
+    pub origin_latitude: f64,
+    pub origin_longitude: f64,
+    pub origin_altitude_m: f64,
+    pub update_rate_hz: f32,
 }
 
-public fn load_default_twin_config() -> ProjectTwinConfig {
-    return ProjectTwinConfig {
-        project_id: 0xDEADBEEF1234,
-        origin_latitude: 9.0765,  // Default project latitude
-        origin_longitude: 7.3986, // Default project longitude
-        update_rate_hz: 30.0
-    };
+impl Default for ProjectTwinConfig {
+    fn default() -> Self {
+        Self {
+            project_id: 0xDEADBEEF1234,
+            origin_latitude: 9.0765, // Default geodetic reference anchor coordinates (Abuja, Nigeria)
+            origin_longitude: 7.3986,
+            origin_altitude_m: 360.0,
+            update_rate_hz: 30.0,
+        }
+    }
+}
+
+// ============================================================================
+// 2. THE LOCK-FREE HOT-SWAPPING CONTAINER (URCU)
+// ============================================================================
+
+pub struct DigitalTwinConfigRegistry {
+    active_config_ptr: AtomicPtr<ProjectTwinConfig>,
+}
+
+impl DigitalTwinConfigRegistry {
+    pub fn new() -> Self {
+        let default_config = Box::new(ProjectTwinConfig::default());
+        Self {
+            active_config_ptr: AtomicPtr::new(Box::into_raw(default_config)),
+        }
+    }
+
+    /// LOCK-FREE HOT READ SNAPSHOT (Hot Path)
+    #[inline(always)]
+    pub fn acquire_snapshot(&self) -> Arc<ProjectTwinConfig> {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Acquire);
+        unsafe { Arc::new(*raw_ptr) }
+    }
+
+    /// ATOMIC AT-RUN-TIME HOT-SWAP (Management Path)
+    pub fn hot_swap_configuration(&self, new_config: ProjectTwinConfig) {
+        let new_raw_ptr = Box::into_raw(Box::new(new_config));
+        let old_raw_ptr = self.active_config_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe {
+                let _ = Box::from_raw(old_raw_ptr); // Deallocate historical frame cleanly
+            }
+        }
+    }
+}
+
+impl Drop for DigitalTwinConfigRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe {
+                let _ = Box::from_raw(raw_ptr);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 3. THE ASYNCHRONOUS LIVE CONFIGURATION LOADER INTERFACE
+// ============================================================================
+
+pub struct LiveConfigurationLoader;
+
+impl LiveConfigurationLoader {
+    /// SPAWNS BACKGROUND FILE WATCHER LOOP
+    /// Spawns an independent OS thread that continuously samples file metadata signatures.
+    /// Hot-swaps the global configuration profile when modifications are verified.
+    pub fn spawn_watcher_loop(
+        registry: Arc<DigitalTwinConfigRegistry>,
+        file_path_str: &'static str,
+        shutdown_signal: Arc<AtomicBool>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let path = Path::new(file_path_str);
+            let mut last_modified_time = None;
+
+            println!("[Watcher Pipeline]: Monitoring file system path target: '{}'...", file_path_str);
+
+            while !shutdown_signal.load(Ordering::Relaxed) {
+                if path.exists() {
+                    if let Ok(metadata) = path.metadata() {
+                        if let Ok(modified_time) = metadata.modified() {
+                            // Check if the file's modification timestamp has shifted
+                            if last_modified_time.is_none() || Some(modified_time) != last_modified_time {
+                                last_modified_time = Some(modified_time);
+
+                                // Read, parse, and process text mutations securely
+                                if let Ok(file_content) = std::fs::read_to_string(path) {
+                                    if let Ok(parsed_config) = serde_json::from_str::<ProjectTwinConfig>(&file_content) {
+                                        // Inject the fresh state configuration matrix completely lock-free
+                                        registry.hot_swap_configuration(parsed_config);
+                                        println!("[Watcher Pipeline]: Successfully synchronized fresh config generation to active memory registers.");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Yield the execution thread to prevent localized CPU performance spikes
+                thread::sleep(Duration::from_millis(250));
+            }
+            println!("[Watcher Pipeline]: Background monitor shutdown sequence verified.");
+        })
+    }
+}
+
+// ============================================================================
+// 4. ENTERPRISE SYSTEM PIEPLINE VALIDATION HARNESS
+// ============================================================================
+
+fn main() {
+    let config_registry = Arc::new(DigitalTwinConfigRegistry::new());
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let mock_config_path = "vct_project_twin_config.json";
+
+    println!("--- Real-Time Asynchronous Digital Twin Configuration Engine Online ---");
+
+    // Pre-create our baseline json configuration file on disk
+    {
+        let default_data = ProjectTwinConfig::default();
+        let serialized_json = serde_json::to_string_pretty(&default_data).unwrap();
+        let mut file = File::create(mock_config_path).unwrap();
+        file.write_all(serialized_json.as_bytes()).unwrap();
+    }
+
+    // 1. Launch the background configuration watcher loop thread
+    let watcher_registry_ref = Arc::clone(&config_registry);
+    let watcher_shutdown_ref = Arc::clone(&shutdown_flag);
+    let worker_thread_handle = LiveConfigurationLoader::spawn_watcher_loop(
+        watcher_registry_ref,
+        mock_config_path,
+        watcher_shutdown_ref,
+    );
+
+    // Give the thread a transient window to capture the initial baseline file state
+    thread::sleep(Duration::from_millis(50));
+
+    // 2. Simulate an administrative external system update (e.g., designer shifts anchor references via JSON)
+    {
+        let modified_profile = ProjectTwinConfig {
+            project_id: 0x9999_8888_7777,
+            origin_latitude: 6.5244, // Shift geodetic coordinates to Lagos, Nigeria reference coordinates
+            origin_longitude: 3.3792,
+            update_rate_hz: 60.0, // Scale synchronization throughput limits
+            ..Default::default()
+        };
+
+        let updated_json = serde_json::to_string_pretty(&modified_profile).unwrap();
+        let mut file = File::create(mock_config_path).unwrap();
+        file.write_all(updated_json.as_bytes()).unwrap();
+        
+        // Allow the background file watcher thread to capture and commit the transaction blocks
+        thread::sleep(Duration::from_millis(300));
+    }
+
+    // 3. Verification: High-throughput ingestion paths instantly witness fresh parameters lock-free
+    let runtime_snapshot = config_registry.acquire_snapshot();
+    println!("\n=== Live Digital Twin Ingestion Audit ===");
+    println!("  Active Project ID   : {:#X} (Expected 0x999988887777)", runtime_snapshot.project_id);
+    println!("  Geodetic Latitude   : {:.4} (Expected 6.5244)", runtime_snapshot.origin_latitude);
+    println!("  Active Sync Rate    : {} Hz (Expected 60.0)", runtime_snapshot.update_rate_hz);
+
+    // 4. Trigger safe structural teardown pass
+    shutdown_flag.store(true, Ordering::Relaxed);
+    worker_thread_handle.join().unwrap();
+    
+    // Clean up transient directory tracking files
+    let _ = std::fs::remove_file(mock_config_path);
+    println!("\nSystem Lifecycle Successfully Terminated.");
 }
