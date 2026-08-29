@@ -1,6 +1,199 @@
-module ICVFX.ChromaKey;
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <memory>
+#include <array>
+#include <cstring>
+#include <algorithm>
 
-public fn execute_green_key(pixel: vec3, key_color: vec3) -> f32 {
-    let dist = vec3_distance(pixel, key_color);
-    return math_clamp((dist - 0.2) / 0.3, 0.0, 1.0);
+// ============================================================================
+// 1. DATA CORE: PACKED MEMORY CHUNKS & COMPILER BRIDGE
+// ============================================================================
+
+/// Exact mirror layout of the GPU Constant Buffer.
+/// Packed with explicit padding to match 16-byte SIMD alignments perfectly.
+struct alignas(16) ICVFXPipelineParameters {
+    // Stage 1: Core Keying & Despill
+    float key_color_ycbcr[3];       
+    float color_space_transform_id; // 0: ACEScg, 1: ARRI LogC4, 2: Passthrough
+    float matte_tolerance;       
+    float matte_softness;        
+    float spill_suppression_mux[3]; 
+    float temporal_blend_weight;    // [0.0 = No history, 0.95 = Ultra-smooth temporal filter]
+    
+    // Stage 2: Geometric Garbage Matte
+    float garbage_matte_min[2];     
+    float garbage_matte_max[2];     
+    
+    // Stage 3: Edge Convolution Filters
+    int   edge_kernel_radius;    
+    float edge_fringe_bias;      
+    float padding[2];               // Explicit alignment padding vector
+};
+
+struct SimulatedTexturePixel {
+    float r, g, b, a;
+};
+
+// ============================================================================
+// 2. THE PEAK PERFORMANCE HARDWARE CONTEXT ENGINE
+// ============================================================================
+
+class ICVFXHardwareHostPipeline {
+private:
+    ICVFXPipelineParameters m_active_params;
+    std::vector<SimulatedTexturePixel> m_temporal_history_buffer;
+    size_t m_width;
+    size_t m_height;
+
+    /// Mathematical transform from raw cinematic ARRI LogC4 inputs to Linear RGB working spaces
+    inline void apply_arri_logc4_to_linear(float& r, float& g, float& b) const {
+        // Precise empirical ARRI LogC4 curve unpacking equations
+        auto logc4_inverse = [](float x) -> float {
+            if (x > 0.1496582f) {
+                return (std::pow(10.0f, (x - 0.385537f) / 0.2471896f) - 0.0056412f) / 0.9943588f;
+            }
+            return (x - 0.0056412f) / (0.2471896f * 2.3025851f * 0.0056412f);
+        };
+        r = logc4_inverse(r);
+        g = logc4_inverse(g);
+        b = logc4_inverse(b);
+    }
+
+    /// Color transformation wrapper matching incoming wide-gamut formats
+    inline void execute_color_space_transform(float& r, float& g, float& b) const {
+        if (m_active_params.color_space_transform_id == 1.0f) { // ARRI LogC4 profile active
+            apply_arri_logc4_to_linear(r, g, b);
+        } else if (m_active_params.color_space_transform_id == 0.0f) { // ACEScg -> Linear sRGB Matrix
+            float ac_r = r, ac_g = g, ac_b = b;
+            r = ac_r *  1.704614f + ac_g * -0.621714f + ac_b * -0.082900f;
+            g = ac_r * -0.130256f + ac_g *  1.140733f + ac_b * -0.010477f;
+            b = ac_r * -0.021074f + ac_g * -0.128860f + ac_b *  1.149934f;
+        }
+    }
+
+    /// Isolated internal YCbCr coordinate calculation
+    inline void linear_rgb_to_ycbcr(float r, float g, float b, float& y, float& cb, float& cr) const {
+        y  =  0.29900f * r + 0.58700f * g + 0.11400f * b;
+        cb = -0.16874f * r - 0.33126f * g + 0.50000f * b + 0.5f;
+        cr =  0.50000f * r - 0.41869f * g - 0.08131f * b + 0.5f;
+    }
+
+public:
+    ICVFXHardwareHostPipeline(size_t width, size_t height) 
+        : m_width(width), m_height(height) {
+        m_temporal_history_buffer.resize(width * height, SimulatedTexturePixel{0.0f, 0.0f, 0.0f, 1.0f});
+        std::memset(&m_active_params, 0, sizeof(ICVFXPipelineParameters));
+    }
+
+    /// HOST API METHOD: Update parameters cleanly from tracking hardware frames in real time
+    void update_constant_buffers(const ICVFXPipelineParameters& runtime_updates) {
+        std::memcpy(&m_active_params, &runtime_updates, sizeof(ICVFXPipelineParameters));
+    }
+
+    /// FULL UNIFIED COMPUTATION GRAPH EXECUTOR
+    /// Simulates parallel GPU warp blocks across memory lines branchlessly.
+    void dispatch_compute_pipeline(const SimulatedTexturePixel* camera_feed, SimulatedTexturePixel* output_composited_buffer) {
+        #pragma omp parallel for collapse(2) // Parallel instruction processing across available hardware thread pools
+        for (size_t y = 0; y < m_height; ++y) {
+            for (size_t x = 0; x < m_width; ++x) {
+                size_t pixel_idx = y * m_width + x;
+                float norm_u = static_cast<float>(x) / static_cast<float>(m_width);
+                float norm_v = static_cast<float>(y) / static_cast<float>(m_height);
+
+                SimulatedTexturePixel current_pixel = camera_feed[pixel_idx];
+
+                // ------------------------------------------------------------------------
+                // STAGE 1: CINEMATIC COLOR SPACE CONVERSION TRANSFORM
+                // ------------------------------------------------------------------------
+                execute_color_space_transform(current_pixel.r, current_pixel.g, current_pixel.b);
+
+                // ------------------------------------------------------------------------
+                // STAGE 2: CORE MATTE EXTRACTION & DESPILL RESOLUTION
+                // ------------------------------------------------------------------------
+                float p_y, p_cb, p_cr;
+                linear_rgb_to_ycbcr(current_pixel.r, current_pixel.g, current_pixel.b, p_y, p_cb, p_cr);
+
+                float cb_delta = p_cb - m_active_params.key_color_ycbcr[1];
+                float cr_delta = p_cr - m_active_params.key_color_ycbcr[2];
+                float color_distance = std::sqrt(cb_delta * cb_delta + cr_delta * cr_delta);
+
+                // Branchless edge soft-matte clamping pass via explicit smoothstep formulation
+                float t = (color_distance - m_active_params.matte_tolerance) / m_active_params.matte_softness;
+                float base_alpha = (t < 0.0f) ? 0.0f : ((t > 1.0f) ? 1.0f : t * t * (3.0f - 2.0f * t));
+
+                // Apply dynamic chromatic despill to isolate color splash bounces
+                float excess_green = std::max(0.0f, current_pixel.g - (current_pixel.r * m_active_params.spill_suppression_mux[0] + current_pixel.b * m_active_params.spill_suppression_mux[2]));
+                float despilled_rgb[3] = { current_pixel.r, current_pixel.g - excess_green, current_pixel.b };
+
+                // ------------------------------------------------------------------------
+                // STAGE 3: TEMPORAL FRAME BLENDING INTEGRATION (Noise Eraser)
+                // ------------------------------------------------------------------------
+                float historical_alpha = m_temporal_history_buffer[pixel_idx].a;
+                float blended_alpha = (historical_alpha * m_active_params.temporal_blend_weight) + (base_alpha * (1.0f - m_active_params.temporal_blend_weight));
+                m_temporal_history_buffer[pixel_idx].a = blended_alpha; // Commit alpha back to historical texture tracking lanes
+
+                // ------------------------------------------------------------------------
+                // STAGE 4: GEOMETRIC GARBAGE MATTE EXTRACTION & FINAL COMPOSITING
+                // ------------------------------------------------------------------------
+                float inside_x = (norm_u >= m_active_params.garbage_matte_min[0] && norm_u <= m_active_params.garbage_matte_max[0]) ? 1.0f : 0.0f;
+                float inside_y = (norm_v >= m_active_params.garbage_matte_min[1] && norm_v <= m_active_params.garbage_matte_max[1]) ? 1.0f : 0.0f;
+                float garbage_matte_mask = inside_x * inside_y;
+
+                float ultimate_composited_alpha = blended_alpha * garbage_matte_mask;
+
+                // Write final multi-channel frame data directly to target memory layers
+                output_composited_buffer[pixel_idx] = SimulatedTexturePixel{
+                    despilled_rgb[0], despilled_rgb[1], despilled_rgb[2], ultimate_composited_alpha
+                };
+            }
+        }
+    }
+};
+
+// ============================================================================
+// 3. ARCHITECTURE VERIFICATION TEST RUNTIME
+// ============================================================================
+
+int main() {
+    std::cout << "=== Veloct C++ Core ICVFX Compositing Pipeline Initializing ===" << std::endl;
+
+    const size_t width = 4;
+    const size_t height = 4;
+    ICVFXHardwareHostPipeline pipeline_engine(width, height);
+
+    // Setup typical telemetry configuration constants
+    ICVFXPipelineParameters live_stage_params;
+    live_stage_params.color_space_transform_id = 1.0f; // Enable ARRI LogC4 extraction profiles
+    live_stage_params.key_color_ycbcr[0] = 0.5f;
+    live_stage_params.key_color_ycbcr[1] = 0.1f;       // Calibrated green screen chroma markers
+    live_stage_params.key_color_ycbcr[2] = 0.1f;
+    live_stage_params.matte_tolerance = 0.2f;
+    live_stage_params.matte_softness = 0.1f;
+    live_stage_params.temporal_blend_weight = 0.5f;     // 50% temporal mix tracking
+    live_stage_params.spill_suppression_mux[0] = 0.5f;
+    live_stage_params.spill_suppression_mux[1] = 0.0f;
+    live_stage_params.spill_suppression_mux[2] = 0.5f;
+    live_stage_params.garbage_matte_min[0] = 0.0f;     
+    live_stage_params.garbage_matte_min[1] = 0.0f;
+    live_stage_params.garbage_matte_max[0] = 0.9f;     // Cutoff outer 10% of display horizontally
+    live_stage_params.garbage_matte_max[1] = 1.0f;
+
+    // Direct configuration push to hardware constant buffers
+    pipeline_engine.update_constant_buffers(live_stage_params);
+
+    // Mock incoming cinematic ARRI LogC4 texture stream frame
+    std::vector<SimulatedTexturePixel> mock_camera_feed(width * height, SimulatedTexturePixel{0.2f, 0.8f, 0.1f, 1.0f});
+    std::vector<SimulatedTexturePixel> output_frame_buffer(width * height);
+
+    // Trigger complete calculation pass loop
+    pipeline_engine.dispatch_compute_pipeline(mock_camera_feed.data(), output_frame_buffer.data());
+
+    std::cout << "\n[Execution Complete]: Diagnostic Channel Output:" << std::endl;
+    std::cout << "  Pixel [0] -> Color(R: " << output_frame_buffer[0].r
+              << ", G: " << output_frame_buffer[0].g
+              << ", B: " << output_frame_buffer[0].b
+              << ") | Alpha (Matte): " << output_frame_buffer[0].a << std::endl;
+
+    return 0;
 }
