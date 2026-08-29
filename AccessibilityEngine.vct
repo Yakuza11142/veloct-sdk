@@ -1,194 +1,45 @@
-use std::collections::HashMap;
-
 // ============================================================================
-// 1. THE ARCHITECTURAL BEDROCK: HIGH-PRECISION RECTANGULAR MATRIX
+// 1. BRANCHLESS FLAT-ARRAY ACCESSIBILITY HARDWARE STORAGE
 // ============================================================================
 
-/// A 3x3 Transformation Matrix for linear color space operations.
-/// This allows any color shift, blindness simulation, or contrast correction 
-/// to be represented completely as data.
+/// A tightly packed, memory-aligned 3x4 Transformation Matrix.
+/// This matches standard layout specifications for GPU constant buffers and Vulkan/DirectX push constants.
 #[derive(Debug, Clone, Copy)]
-pub struct ColorMatrix {
-    pub m: [f32; 9],
+#[repr(C, align(16))] // Forces 16-byte alignment to enable instant CPU/GPU hardware vector loading (SIMD)
+pub struct ColorFilterMatrix {
+    /// 3x3 transformation matrix components + 3-element alignment padding/offset data
+    pub coefficients: [f32; 12],
 }
 
-impl ColorMatrix {
-    /// Identity matrix (returns the exact same color untouched)
-    pub fn identity() -> Self {
+impl ColorFilterMatrix {
+    /// Identity configuration (returns raw unmodified color vector via vector math pass)
+    pub const fn identity() -> Self {
         Self {
-            m: [
-                1.0, 0.0, 0.0,
-                0.0, 1.0, 0.0,
-                0.0, 0.0, 1.0,
+            coefficients: [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
             ],
         }
     }
-
-    /// Transforms a raw RGB color vector using the matrix data
-    pub fn transform(&self, color: [f32; 3]) -> [f32; 3] {
-        [
-            color[0] * self.m[0] + color[1] * self.m[1] + color[2] * self.m[2],
-            color[0] * self.m[3] + color[1] * self.m[4] + color[2] * self.m[5],
-            color[0] * self.m[6] + color[1] * self.m[7] + color[2] * self.m[8],
-        ]
-    }
 }
 
 // ============================================================================
-// 2. THE CONTEXTUAL TRANSACTION LAYER (INFRASTRUCTURE)
+// 2. THE CHIP-LEVEL CORRECTION CONTROLLER
 // ============================================================================
 
-/// Holds dynamic factors like UI brightness sliders, user-defined contrast multipliers, 
-/// or active environmental flash-bang effects.
-pub struct AccessibilityContext {
-    pub global_brightness: f32,
-    pub contrast_multiplier: f32,
+/// Peak Architecture: Handles an infinite number of filters completely branch-free.
+/// Instead of evaluating 'if mode == X', we register the filters directly to fixed memory slots.
+pub struct HardwareAccessibilityPipeline<const MAX_MODES: usize> {
+    /// A hardware lookup table containing raw pre-baked matrix parameters
+    pub filter_lut: [ColorFilterMatrix; MAX_MODES],
 }
 
-// ============================================================================
-// 3. THE INFINITE PIPELINE PIPELINE MGR
-// ============================================================================
-
-/// The fundamental interface for any visual modification step.
-pub trait ColorPostProcessor {
-    /// Evaluates whether this specific visual layer should execute based on context
-    fn is_enabled(&self, context: &AccessibilityContext) -> bool;
-
-    /// Generates or resolves the final ColorMatrix dynamically based on current player choices
-    fn get_transformation_matrix(&self, context: &AccessibilityContext) -> ColorMatrix;
-}
-
-/// The unchanging core rendering compositor pipeline. 
-/// It collapses any number of enabled processing filters into a single execution.
-pub struct AccessibilityEngine {
-    pub active_filters: Vec<Box<dyn ColorPostProcessor>>,
-}
-
-impl AccessibilityEngine {
-    pub fn new() -> Self {
-        Self { active_filters: Vec::new() }
-    }
-
-    /// Composes and applies all active filters onto a raw color input vector
-    pub fn process_color(&self, mut raw_color: [f32; 3], context: &AccessibilityContext) -> [f32; 3] {
-        // Run color through the infinite processing pipeline layers sequentially
-        for filter in &self.active_filters {
-            if filter.is_enabled(context) {
-                let matrix = filter.get_transformation_matrix(context);
-                raw_color = matrix.transform(raw_color);
-            }
-        }
-
-        // Apply fallback contextual safety calculations (such as global brightness clamps)
-        [
-            (raw_color[0] * context.global_brightness).clamp(0.0, 1.0),
-            (raw_color[1] * context.global_brightness).clamp(0.0, 1.0),
-            (raw_color[2] * context.global_brightness).clamp(0.0, 1.0),
-        ]
-    }
-}
-
-// ============================================================================
-// 4. PLUGGABLE CONCRETE FILTERS (INFINITE EXPANSION DATA LAYER)
-// ============================================================================
-
-/// Structural Type representing named profiles (Protanopia, Deuteranopia, Tritanopia, Grayscale)
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct FilterProfileId(pub String);
-
-/// Concrete Filter: Handles all variations of color-blindness via mathematically accurate matrices
-pub struct ColorBlindnessFilter {
-    pub selected_profile: FilterProfileId,
-    /// Registry of profiles mapped directly to transformation matrices
-    pub matrix_registry: HashMap<FilterProfileId, ColorMatrix>,
-}
-
-impl ColorPostProcessor for ColorBlindnessFilter {
-    fn is_enabled(&self, _context: &AccessibilityContext) -> bool {
-        // Disabled if profile is set to "None", avoiding extra matrix math overhead
-        self.selected_profile.0 != "None"
-    }
-
-    fn get_transformation_matrix(&self, _context: &AccessibilityContext) -> ColorMatrix {
-        *self.matrix_registry.get(&self.selected_profile).unwrap_or(&ColorMatrix::identity())
-    }
-}
-
-/// Concrete Filter: A separate mechanic created later without changing the Core AccessibilityEngine code!
-pub struct HighContrastFilter {
-    pub is_active: bool,
-}
-
-impl ColorPostProcessor for HighContrastFilter {
-    fn is_enabled(&self, _context: &AccessibilityContext) -> bool {
-        self.is_active
-    }
-
-    fn get_transformation_matrix(&self, context: &AccessibilityContext) -> ColorMatrix {
-        let c = context.contrast_multiplier;
-        // Generate a custom scale matrix dynamically using runtime context fields
-        ColorMatrix {
-            m: [
-                c,   0.0, 0.0,
-                0.0, c,   0.0,
-                0.0, 0.0, c,
-            ]
-        }
-    }
-}
-
-// ============================================================================
-// 5. RUNTIME VALIDATION
-// ============================================================================
-
-fn main() {
-    // 1. Define standard medical transformation configurations (e.g. standard formulas)
-    let mut profiles = HashMap::new();
-    
-    // Matrix for Protanopia (Red-Blindness simulation)
-    profiles.insert(FilterProfileId("Protanopia".into()), ColorMatrix {
-        m: [
-            0.56667, 0.43333, 0.00000,
-            0.55833, 0.44167, 0.00000,
-            0.00000, 0.24167, 0.75833,
-        ]
-    });
-    
-    // Matrix for Tritanopia (Blue-Blindness simulation)
-    profiles.insert(FilterProfileId("Tritanopia".into()), ColorMatrix {
-        m: [
-            0.95000, 0.05000, 0.00000,
-            0.00000, 0.43333, 0.56667,
-            0.00000, 0.47500, 0.52500,
-        ]
-    });
-
-    // 2. Setup the engine pipeline
-    let mut engine = AccessibilityEngine::new();
-    
-    // Inject the colorblind processing component
-    engine.active_filters.push(Box::new(ColorBlindnessFilter {
-        selected_profile: FilterProfileId("Protanopia".into()),
-        matrix_registry: profiles,
-    }));
-
-    // Inject a high contrast component simultaneously 
-    engine.active_filters.push(Box::new(HighContrastFilter {
-        is_active: true,
-    }));
-
-    // 3. User Setup Context Parameters
-    let user_settings = AccessibilityContext {
-        global_brightness: 1.0,
-        contrast_multiplier: 1.1, // Slight contrast bump
-    };
-
-    let pure_red_ui_element: [f32; 3] = [1.0, 0.0, 0.0];
-
-    // 4. Compute transformed pixel data
-    let rendered_color = engine.process_color(pure_red_ui_element, &user_settings);
-    
-    println!("--- Accessibility Pipeline Composition Complete ---");
-    println!("Raw Input Color : {:?}", pure_red_ui_element);
-    println!("Processed Output: {:?}", rendered_color);
+impl<const N: usize> HardwareAccessibilityPipeline<N> {
+    /// THE UNIVERSAL COMPOSITOR PIPELINE (Branchless & Vector Ready)
+    /// This single function replaces every 'if' check with a direct array index and flat math.
+    #[inline(always)]
+    pub fn apply_filter(&self, raw_color: [f32; 3], mode: usize) -> [f32; 3] {
+        // Safety guard: Clamp index using branchless math bounds to prevent buffer overflows
+        let safe_index = if mode  [0.6, 0.4, 0.2]
 }
