@@ -1,22 +1,236 @@
-module Aerospace.Guidance;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::thread;
 
-struct TargetInterception {
-    interceptor_pos: vec3,
-    interceptor_vel: vec3,
-    target_pos: vec3,
-    target_vel: vec3,
-    nav_constant: f32 // ProNav gain constant (typically 3.0 to 5.0)
+// ============================================================================
+// 1. DATA CORE: PACKED MEMORY & EMPIRICAL LOOK-UP ARRAYS
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[repr(C, align(16))]
+pub struct Vec3 { pub x: f32, pub y: f32, pub z: f32 }
+
+impl Vec3 {
+    pub fn dot(&self, r: Self) -> f32 { self.x*r.x + self.y*r.y + self.z*r.z }
+    pub fn cross(&self, r: Self) -> Self {
+        Self {
+            x: self.y*r.z - self.z*r.y,
+            y: self.z*r.x - self.x*r.z,
+            z: self.x*r.y - self.y*r.x,
+        }
+    }
+    pub fn len_sq(&self) -> f32 { self.dot(*self) }
+    pub fn len(&self) -> f32 { self.len_sq().sqrt() }
+    pub fn normalize(&self) -> Self {
+        let l = self.len();
+        if l > 0.0 { Self { x: self.x/l, y: self.y/l, z: self.z/l } } else { *self }
+    }
 }
 
-public system ProportionalNavigation {
-    // Solves True Proportional Navigation (TPN) guidance acceleration vector
-    public fn compute_pronav_acceleration(data: TargetInterception) -> vec3 {
-        let relative_pos = data.target_pos - data.interceptor_pos;
-        let relative_vel = data.target_vel - data.interceptor_vel;
+impl std::ops::Add for Vec3 { type Output = Self; fn add(self, r: Self) -> Self { Self { x: self.x+r.x, y: self.y+r.y, z: self.z+r.z } } }
+impl std::ops::Sub for Vec3 { type Output = Self; fn sub(self, r: Self) -> Self { Self { x: self.x-r.x, y: self.y-r.y, z: self.z-r.z } } }
+impl std::ops::Mul<f32> for Vec3 { type Output = Self; fn mul(self, r: f32) -> Self { Self { x: self.x*r, y: self.y*r, z: self.z*r } } }
+
+/// Bilinear interpolation grid representing non-linear structural airframe limits 
+/// determined by aerodynamic wind tunnel analysis.
+pub struct AerodynamicAirframeTable<const M: usize, const A: usize> {
+    pub mach_axis: [f32; M],
+    pub altitude_axis: [f32; A],
+    pub max_g_grid: [[f32; A]; M],
+}
+
+impl<const M: usize, const A: usize> AerodynamicAirframeTable<M, A> {
+    pub fn evaluate_max_g(&self, mach: f32, alt: f32) -> f32 {
+        let m = mach.clamp(self.mach_axis[0], self.mach_axis[M - 1]);
+        let a = alt.clamp(self.altitude_axis[0], self.altitude_axis[A - 1]);
+
+        let mut i = 0; while i < M - 2 && m > self.mach_axis[i + 1] { i += 1; }
+        let mut j = 0; while j < A - 2 && a > self.altitude_axis[j + 1] { j += 1; }
+
+        let t = (m - self.mach_axis[i]) / (self.mach_axis[i + 1] - self.mach_axis[i]);
+        let u = (a - self.altitude_axis[j]) / (self.altitude_axis[j + 1] - self.altitude_axis[j]);
+
+        let c00 = self.max_g_grid[i][j];
+        let c10 = self.max_g_grid[i + 1][j];
+        let c01 = self.max_g_grid[i][j + 1];
+        let c11 = self.max_g_grid[i + 1][j + 1];
+
+        (1.0 - t) * (1.0 - u) * c00 + t * (1.0 - u) * c10 + (1.0 - t) * u * c01 + t * u * c11
+    }
+}
+
+/// The core runtime context structure mapping the entire physical scenario state.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct FlightGuidanceTelemetry {
+    pub interceptor_pos: Vec3,
+    pub interceptor_vel: Vec3,
+    pub target_pos: Vec3,
+    pub target_vel: Vec3,
+    pub target_accel: Vec3,
+    pub current_mach: f32,
+    pub nav_constant: f32,
+}
+
+// ============================================================================
+// 2. THE LOCK-FREE REPOSITORY SYSTEM LAYER (URCU)
+// ============================================================================
+
+pub struct LockFreeTelemetryRegistry {
+    active_ptr: AtomicPtr<FlightGuidanceTelemetry>,
+    current_epoch: AtomicUsize,
+    reader_counts: [AtomicUsize; 2],
+}
+
+impl LockFreeTelemetryRegistry {
+    pub fn new(initial: FlightGuidanceTelemetry) -> Self {
+        Self {
+            active_ptr: AtomicPtr::new(Box::into_raw(Box::new(initial))),
+            current_epoch: AtomicUsize::new(0),
+            reader_counts: [AtomicUsize::new(0), AtomicUsize::new(0)],
+        }
+    }
+
+    #[inline(always)]
+    pub fn acquire_snapshot(&self) -> SharedGuard {
+        let epoch = self.current_epoch.load(Ordering::Acquire);
+        self.reader_counts[epoch].fetch_add(1, Ordering::SeqCst);
+        let ptr = self.active_ptr.load(Ordering::Acquire);
+        SharedGuard { config_ref: unsafe { &*ptr }, epoch, registry_ref: self }
+    }
+
+    pub fn hot_swap_telemetry(&self, fresh_data: FlightGuidanceTelemetry) {
+        let new_ptr = Box::into_raw(Box::new(fresh_data));
+        let old_ptr = self.active_ptr.swap(new_ptr, Ordering::Release);
         
-        let los_rate = vec3_cross(relative_pos, relative_vel) / vec3_dot(relative_pos, relative_pos);
-        let closing_velocity = vec3_length(relative_vel);
+        let old_epoch = self.current_epoch.load(Ordering::Relaxed);
+        let new_epoch = old_epoch ^ 1;
+        self.current_epoch.store(new_epoch, Ordering::Release);
+
+        while self.reader_counts[old_epoch].load(Ordering::Acquire) > 0 {
+            thread::yield_now();
+        }
+        if !old_ptr.is_null() { unsafe { let _ = Box::from_raw(old_ptr); } }
+    }
+}
+
+pub struct SharedGuard<'a> { config_ref: &'a FlightGuidanceTelemetry, epoch: usize, registry_ref: &'a LockFreeTelemetryRegistry }
+impl<'a> std::ops::Deref for SharedGuard<'a> { type Target = FlightGuidanceTelemetry; fn deref(&self) -> &Self::Target { self.config_ref } }
+impl<'a> Drop for SharedGuard<'a> { fn drop(&mut self) { self.registry_ref.reader_counts[self.epoch].fetch_sub(1, Ordering::SeqCst); } }
+
+// ============================================================================
+// 3. ATOMIC DYNAMICS VECTOR INTEGRATION ENGINE (APN + RK4)
+// ============================================================================
+
+pub struct GodTierGuidanceEngine<const M: usize, const A: usize> {
+    pub aero_limits_table: AerodynamicAirframeTable<M, A>,
+}
+
+impl<const M: usize, const A: usize> GodTierGuidanceEngine<M, A> {
+    /// Predictive derivative function for targets acceleration
+    #[inline(always)]
+    fn target_acceleration_derivative(&self, vel: Vec3, accel: Vec3) -> Vec3 {
+        let speed = vel.len().max(0.1);
+        let drag_decay_dir = vel.normalize() * -0.05 * (speed * 0.001);
+        accel + drag_decay_dir
+    }
+
+    /// 4th-Order Runge-Kutta Predictive Path-Ahead Sub-Step
+    pub fn predict_target_future_position(&self, start_pos: Vec3, start_vel: Vec3, start_accel: Vec3, dt: f32) -> Vec3 {
+        let h = dt;
         
-        return vec3_cross(data.interceptor_vel, los_rate) * (data.nav_constant * closing_velocity);
+        let p_k1 = start_vel;
+        let v_k1 = start_accel;
+        let a_k1 = self.target_acceleration_derivative(p_k1, v_k1);
+
+        let p_k2 = start_vel + v_k1 * (h * 0.5);
+        let v_k2 = start_accel + a_k1 * (h * 0.5);
+        let a_k2 = self.target_acceleration_derivative(p_k2, v_k2);
+
+        let p_k3 = start_vel + v_k2 * (h * 0.5);
+        let v_k3 = start_accel + a_k2 * (h * 0.5);
+        let a_k3 = self.target_acceleration_derivative(p_k3, v_k3);
+
+        let p_k4 = start_vel + v_k3 * h;
+        let v_k4 = start_accel + a_k3 * h;
+        let a_k4 = self.target_acceleration_derivative(p_k4, v_k4);
+
+        start_pos + (p_k1 + p_k2 * 2.0 + p_k3 * 2.0 + p_k4) * (h / 6.0)
+    }
+
+    /// THE ZENITH APN CALCULATOR
+    pub fn compute_optimal_interception_vector(&self, telemetry: &FlightGuidanceTelemetry) -> Vec3 {
+        let predicted_target_pos = self.predict_target_future_position(
+            telemetry.target_pos, 
+            telemetry.target_vel, 
+            telemetry.target_accel, 
+            0.20
+        );
+
+        let r = predicted_target_pos - telemetry.interceptor_pos;
+        let v = telemetry.target_vel - telemetry.interceptor_vel;
+
+        let safe_r_len_sq = r.len_sq().max(0.0001);
+        let los_rate = r.cross(v) * (1.0 / safe_r_len_sq);
+        let closing_speed = -v.dot(r.normalize());
+
+        let pronav_component = telemetry.interceptor_vel.cross(los_rate) * (telemetry.nav_constant * closing_speed);
+        let target_accel_normal = r.normalize().cross(telemetry.target_accel).cross(r.normalize());
+        let augmented_component = target_accel_normal * (0.5 * telemetry.nav_constant);
+
+        let final_raw_command = pronav_component + augmented_component;
+
+        let dynamic_g_max = self.aero_limits_table.evaluate_max_g(
+            telemetry.current_mach, 
+            telemetry.interceptor_pos.y
+        );
+
+        let cmd_mag = final_raw_command.len();
+        let structural_ceiling_mps2 = dynamic_g_max * 9.80665;
+
+        if cmd_mag > structural_ceiling_mps2 {
+            final_raw_command.normalize() * structural_ceiling_mps2
+        } else {
+            final_raw_command
+        }
+    }
+}
+
+// ============================================================================
+// 4. SYSTEM RUNTIME VERIFICATION
+// ============================================================================
+
+fn main() {
+    let look_up_matrix = AerodynamicAirframeTable {
+        mach_axis: [1.0, 2.0, 3.0],
+        altitude_axis: [0.0, 5000.0, 15000.0],
+        max_g_grid: [
+            [15.0, 12.0, 5.0],
+            [25.0, 22.0, 12.0],
+            [40.0, 35.0, 18.0],
+        ],
+    };
+
+    let target_engine = GodTierGuidanceEngine { aero_limits_table: look_up_matrix };
+
+    let initial_telemetry = FlightGuidanceTelemetry {
+        interceptor_pos: Vec3 { x: 10000.0, y: 5000.0, z: 0.0 }, // Standing at 5000m altitude
+        interceptor_vel: Vec3 { x: 1020.0, y: 20.0, z: 0.0 },     // Flying at Mach 3
+        target_pos: Vec3 { x: 11200.0, y: 5200.0, z: 0.0 },
+        target_vel: Vec3 { x: 300.0, y: 150.0, z: 10.0 },
+        target_accel: Vec3 { x: 0.0, y: 78.45, z: 0.0 },         // Target pulling a massive 8G climb
+        current_mach: 3.0,
+        nav_constant: 4.0,
+    };
+
+    let shared_registry = LockFreeTelemetryRegistry::new(initial_telemetry);
+    println!("--- Absolute Zenith Unified Guidance & Physics Architecture Online ---");
+
+    {
+        let data_snapshot = shared_registry.acquire_snapshot();
+        let acceleration_command = target_engine.compute_optimal_interception_vector(&data_snapshot);
+        let command_g = acceleration_command.len() / 9.80665;
+        println!("Lock-Free Ingestion Read Complete.");
+        println!("  Calculated Optimal Intercept Acceleration Vector: {:?}", acceleration_command);
+        println!("  Dynamically Enforced Airframe Load Profile: {:.2} Gs", command_g);
     }
 }
