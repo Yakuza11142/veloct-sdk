@@ -1,23 +1,107 @@
-module Forensics.Evacuation;
+// ============================================================================
+// 1. DATA CORE: HARDWARE-ALIGNED BUFFER UNIFORM STRUCTS
+// ============================================================================
 
-struct PedestrianAgent {
-    position: vec3,
-    velocity: vec3,
-    personal_space_radius: f32
+// Memory-aligned to strict 16-byte structural boundaries for modern GPU constant buffers
+struct CrowdSimulationParams {
+    float cell_size;               // Width of spatial partitioning bucket (e.g., 2.0 meters)
+    float personal_space_radius;   // Buffer zone threshold where compression begins (e.g., 0.65m)
+    uint  total_agent_count;       // Maximum tracking ceiling across the scene allocation array
+    float padding;                 // Strict hardware structural memory alignment padding
+};
+
+struct GpuPedestrianAgent {
+    float3 position;
+    uint   cell_hash_id;
+    float3 velocity;
+    float  structural_mass_kg;
+};
+
+// ============================================================================
+// 2. RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+StructuredBuffer<GpuPedestrianAgent> AgentInputBuffer   : register(t0); // All agents in the scene
+StructuredBuffer<uint2>              SpatialCellLookup   : register(t1); // X: Start index, Y: End index in Sorted Buffer
+RWStructuredBuffer<float>            OutputPressureBuffer : register(u0); // Computed scalar crush tensor output
+
+// ============================================================================
+// 3. THE PEAK COMPUTE KERNEL: BRANCHLESS SPATIAL DISPATCH
+// ============================================================================
+
+/// Pure mathematical, branchless spatial hashing mapping 3D positions into a 1D Key.
+/// Replaces slow string or dynamic map queries with a single primitive hash function.
+int compute_gpu_cell_hash(float3 position, float cell_size) {
+    int xi = (int)floor(position.x / cell_size);
+    int zi = (int)floor(position.z / cell_size);
+    // Cantor-inspired prime hash combination formula
+    return (xi * 73856093) ^ (zi * 19349663);
 }
 
-public system CrowdDensityEngine {
-    // Calculates compression pressure forces in bottleneck areas
-    public fn calculate_crowd_pressure(agent: PedestrianAgent, neighbor_positions: [vec3; 16], neighbor_count: u64) -> f32 {
-        let mut total_pressure: f32 = 0.0;
-        let mut i: u64 = 0;
-        while i < neighbor_count {
-            let dist = vec3_distance(agent.position, neighbor_positions[i]);
-            if dist < agent.personal_space_radius {
-                total_pressure += (agent.personal_space_radius - dist);
-            }
-            i += 1;
-        }
-        return total_pressure;
+[numthreads(256, 1, 1)]
+void ComputeCrowdPressureKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<CrowdSimulationParams> config : register(b0)
+) {
+    uint agent_idx = dispatch_id.x;
+    
+    // Safety boundary check: break execution loop if thread exceeds total allocated array size
+    if (agent_idx >= config.total_agent_count) {
+        return;
     }
+
+    // Step 1: Extract the current victim profile parameters
+    GpuPedestrianAgent current_agent = AgentInputBuffer[agent_idx];
+    float3 agent_pos = current_agent.position;
+    
+    float3 total_directional_pressure = float3(0.0, 0.0, 0.0);
+    const float safe_epsilon = 0.0001;
+
+    // Step 2: Determine current local cell coordinates
+    int center_cell_x = (int)floor(agent_pos.x / config.cell_size);
+    int center_cell_z = (int)floor(agent_pos.z / config.cell_size);
+
+    // Step 3: Scan adjacent grid offsets branchlessly: [-1, 0, 1] across spatial layout grids
+    for (int dx = -1; dx <= 1; dx++) {
+        for (int dz = -1; dz <= 1; dz++) {
+            // Compute the target neighbor cell key
+            int target_xi = center_cell_x + dx;
+            int target_zi = center_cell_z + dz;
+            uint target_bucket_hash = (uint)((target_xi * 73856093) ^ (target_zi * 19349663));
+
+            // Query our spatial grid lookup buffer for start/end pointers inside this hash block
+            uint2 cell_bounds = SpatialCellLookup[target_bucket_hash];
+            
+            // Loop through the contiguous memory chunk belonging exclusively to this local cell
+            for (uint neighbor_idx = cell_bounds.x; neighbor_idx < cell_bounds.y; neighbor_idx++) {
+                GpuPedestrianAgent neighbor = AgentInputBuffer[neighbor_idx];
+                
+                // Calculate physical displacement vectors
+                float3 displacement_vector = agent_pos - neighbor.position;
+                float current_distance = length(displacement_vector);
+
+                // Self-collision safety filter: avoid calculating forces against the active thread item
+                float is_not_self = step(safe_epsilon, current_distance);
+                
+                // Compression checking condition check: active if distance < personal space radius
+                float is_clipping = step(current_distance, config.personal_space_radius);
+                
+                // Combined hardware step bitmask configuration matrix
+                float active_force_mask = is_clipping * is_not_self;
+
+                // Determine directional vector compression components branchlessly
+                float compression_magnitude = (config.personal_space_radius - current_distance) * active_force_mask;
+                float3 normal_direction_vector = displacement_vector / max(safe_epsilon, current_distance);
+
+                // Accumulate vector pressure layers onto the victim's chest profile coordinate tracking lines
+                total_directional_pressure += normal_direction_vector * compression_magnitude;
+            }
+        }
+    }
+
+    // Step 4: Resolve the aggregated multi-directional vectors into a final scalar pressure reading
+    float final_crush_load_metric = length(total_directional_pressure);
+
+    // Commit final calculated data blocks straight back to output VRAM storage buffers
+    OutputPressureBuffer[agent_idx] = final_crush_load_metric;
 }
