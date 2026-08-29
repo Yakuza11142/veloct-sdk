@@ -1,11 +1,82 @@
-module VFX.Decals;
+// ============================================================================
+// 1. DATA CORE: HARDWARE-ALIGNED CONSTANT BUFFER MEMORY MAPPING
+// ============================================================================
 
-struct Decal {
-    position: vec3,
-    normal: vec3,
-    decal_type: u16
-}
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics APIs
+struct DecalSimulationParams {
+    float4x4 inv_view_projection;  // Converts screen-space Clip space UV + Depth back to World Space
+    float4x4 inv_world_matrix;     // Converts reconstructed World Space coordinates to Decal Local Space
+    uint2    display_resolution;   // Screen dimensions in pixels (e.g., 3840x2160)
+    uint     decal_type_id;        // Texture slice channel identifier mapping
+    float    padding;              // Strict hardware memory alignment padding
+};
 
-public fn place_decal(hit_pos: vec3, hit_norm: vec3, decal_id: u16) -> Decal {
-    return Decal { position: hit_pos, normal: hit_norm, decal_type: decal_id };
+// ============================================================================
+// 2. RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+Texture2D<float>  SceneDepthTexture  : register(t0); // Raw hardware G-Buffer Depth Buffer channel
+Texture2D<float4> DecalAtlasTexture   : register(t1); // Albedo/Normal texture sheet array slice
+SamplerState      LinearWrapSampler  : register(s0); // Hardware texture sampler configuration
+
+RWTexture2D<float4> OutputColorBuffer : register(u0); // Target HDR Color Render Target frame buffer
+
+// ============================================================================
+// 3. THE PEAK COMPUTE KERNEL: DEFERRED POSITION RECONSTRUCTION
+// ============================================================================
+
+[numthreads(16, 16, 1)]
+void ComputeDeferredDecalProjectionKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<DecalSimulationParams> config : register(b0)
+) {
+    uint2 screen_coords = dispatch_id.xy;
+    
+    // Safety boundary check: drop execution thread if it steps past viewport dimensions
+    if (screen_coords.x >= config.display_resolution.x || screen_coords.y >= config.display_resolution.y) {
+        return;
+    }
+
+    // Step 1: Normalize screen-pixel integer coordinates into a uniform UV grid [0.0 - 1.0]
+    float2 uv = (float2)screen_coords / (float2)config.display_resolution;
+
+    // Step 2: Fetch raw non-linear scene depth parameter from the hardware G-Buffer
+    float depth_sample = SceneDepthTexture[screen_coords];
+
+    // Step 3: Reconstruct 3D World Space Position from Clip Space (UV + Depth)
+    // Convert UV and hardware depth fields branchlessly to screen-normalized Clip Space coords [-1.0 to 1.0]
+    float4 clip_space_position = float4(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, depth_sample, 1.0);
+    
+    // Multiply by inverse view projection matrix to resolve true world coordinates
+    float4 world_space_position = mul(config.inv_view_projection, clip_space_position);
+    world_space_position /= world_space_position.w; // Perspective division step
+
+    // Step 4: Transform reconstructed World Space vector directly into Decal Local Clip Space
+    float4 local_space_position = mul(config.inv_world_matrix, float4(world_space_position.xyz, 1.0));
+
+    // Step 5: Bounding Box Intersection Check (Decal volumes project between [-0.5, 0.5] locally)
+    // step(a, b) returns 1.0 if b >= a, and 0.0 if b < a.
+    // Checks if position is within bounds completely branchlessly, wiping out thread divergence stalls
+    float3 is_above_min = step(float3(-0.5, -0.5, -0.5), local_space_position.xyz);
+    float3 is_below_max = step(local_space_position.xyz, float3(0.5, 0.5, 0.5));
+    
+    // Combine axis bits: returns 1.0 only if pixel falls inside the 3D volume cube box matrix
+    float projection_visibility_mask = is_above_min.x * is_above_min.y * is_above_min.z *
+                                       is_below_max.x * is_below_max.y * is_below_max.z;
+
+    // Step 6: Map UV coordinates for texturing from the local projection plane coordinates
+    // Shift coordinates from clip space range [-0.5, 0.5] to standard texture layout fields [0.0, 1.0]
+    float2 decal_texture_uv = local_space_position.xz + 0.5;
+
+    // Sample albedo color profiles out of the registered texture assets array sheet channel
+    float4 decal_color_sample = DecalAtlasTexture.SampleLevel(LinearWrapSampler, decal_texture_uv, 0);
+
+    // Step 7: Combine visibility bitmasks and apply texture mapping outputs branchlessly
+    float ultimate_blend_alpha = decal_color_sample.a * projection_visibility_mask;
+    
+    float3 current_scene_color = OutputColorBuffer[screen_coords].rgb;
+    float3 ultimate_composited_rgb = lerp(current_scene_color, decal_color_sample.rgb, ultimate_blend_alpha);
+
+    // Commit final multi-channel frame data back to display buffers branchlessly
+    OutputColorBuffer[screen_coords] = float4(ultimate_composited_rgb, 1.0);
 }
