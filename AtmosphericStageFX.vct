@@ -1,5 +1,68 @@
-module Lighting.Atmosphere;
+// ============================================================================
+// 1. DATA CORE: PHYSICALLY-BASED STAGE LIGHTING CONSTANTS
+// ============================================================================
 
-public fn compute_stage_fog(distance: f32, density: f32) -> f32 {
-    return 1.0 - math_exp(-distance * density);
+// Aligned to 16-byte memory blocks for modern GPU constant buffers
+struct StageEnvironmentParams {
+    float3 fog_color;             // The structural color of the fog medium
+    float  base_density;          // Fog density at the stage floor level (Y = 0)
+    float  height_falloff;        // Exponential decay factor as height increases
+    float  anisotropy;            // Mie phase parameter [-1.0 (back) to 1.0 (forward scattering)]
+};
+
+// ============================================================================
+// 2. THE PEAK VOLUMETRIC FOG COMPOSITOR
+// ============================================================================
+
+/// Computes the exact analytical integral of an exponential height fog field.
+/// This allows you to compute non-uniform fog density along a ray without expensive ray-marching.
+float compute_height_fog_density(float3 world_ro, float3 world_rd, float distance, StageEnvironmentParams params) {
+    // Prevent divide-by-zero errors when rays travel perfectly horizontally
+    float ray_y = max(abs(world_rd.y), 0.0001) * sign(world_rd.y);
+    
+    // Analytical integration formula for exponential height fields:
+    // Integral = (base_density / height_falloff) * exp(-ro.y * height_falloff) * (1.0 - exp(-distance * rd.y * height_falloff)) / rd.y
+    float ext_factor = params.base_density * exp(-world_ro.y * params.height_falloff);
+    float ray_factor = (1.0 - exp(-distance * ray_y * params.height_falloff)) / ray_y;
+    
+    return (ext_factor * ray_factor) / params.height_falloff;
+}
+
+/// Henyey-Greenstein Phase Function. 
+/// Simulates how light particles scatter when a theatrical stage light hits the fog.
+float henyey_greenstein_phase(float cos_theta, float g) {
+    float g2 = g * g;
+    float denom = 1.0 + g2 - 2.0 * g * cos_theta;
+    return (1.0 - g2) / (4.0 * 3.14159265 * denom * sqrt(denom));
+}
+
+/// THE UNIVERSAL STAGE FOG SOLVER
+/// Evaluates both volumetric scattering absorption and directional stage light interaction.
+float4 apply_peak_stage_fog(
+    float3 surface_color, 
+    float3 world_ro, 
+    float3 world_rd, 
+    float  distance, 
+    float3 light_dir, 
+    float3 light_intensity,
+    StageEnvironmentParams params
+) {
+    // Step 1: Calculate the exact non-uniform optical depth along the ray path
+    float optical_depth = compute_height_fog_density(world_ro, world_rd, distance, params);
+    
+    // Step 2: Compute transmission factor (how much background color survives)
+    float transmittance = exp(-optical_depth);
+    
+    // Step 3: Compute forward scattering illumination (In-scattering from stage lights)
+    float cos_theta = dot(world_rd, light_dir);
+    float phase = henyey_greenstein_phase(cos_theta, params.anisotropy);
+    float3 in_scattering_light = light_intensity * phase * params.fog_color;
+    
+    // Step 4: Blend the ambient environment fog with direct directional spotlight glow
+    float3 total_fog_contribution = (params.fog_color * (1.0 - transmittance)) + (in_scattering_light * optical_depth);
+    
+    // Composite final color output: (Surviving background light) + (Added fog light)
+    float3 final_color = (surface_color * transmittance) + total_fog_contribution;
+    
+    return float4(final_color, 1.0);
 }
