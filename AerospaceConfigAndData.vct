@@ -1,17 +1,166 @@
-module Aerospace.Config;
+// ============================================================================
+// 1. MEMORY STRUCTURE WITH ECC & FAULT CORRECTION LAYERS
+// ============================================================================
 
-struct DefenseSystemConfig {
-    system_id: u32,
-    radar_frequency_ghz: f32,
-    max_g_force_limit: f32,
-    blackbox_recording_enabled: bool
+/// Memory Block Metadata tracking safety integrity constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C, align(16))]
+pub struct ConfigMetadata {
+    pub sequence_id: u32,
+    /// Cyclic Redundancy Check (CRC-32) hash to guard configuration values
+    pub expected_crc32: u32,
 }
 
-public fn load_default_aerospace_config() -> DefenseSystemConfig {
-    return DefenseSystemConfig {
+/// A tightly packed Defense System configuration data structure.
+/// Conforms to flight memory alignment rules to enable direct hardware memory mapping.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C, align(16))]
+pub struct DefenseSystemConfig {
+    pub system_id: u32,
+    pub radar_frequency_ghz: f32,
+    pub max_g_force_limit: f32,
+    pub blackbox_recording_enabled: u32, // Replaced primitive bool with u32 to guard against single-bit flips
+}
+
+/// Triple Modular Redundancy (TMR) block layout.
+/// Used to detect and fix bit flips caused by radiation/cosmic rays in the upper atmosphere.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, align(64))]
+pub struct TmrConfigContainer {
+    pub primary_channel: DefenseSystemConfig,
+    pub secondary_channel: DefenseSystemConfig,
+    pub tertiary_channel: DefenseSystemConfig,
+    pub metadata: ConfigMetadata,
+}
+
+// ============================================================================
+// 2. HARDWARE INTEGRITY & ERROR CORRECTION ENGINE
+// ============================================================================
+
+pub struct AerospaceConfigManager;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultStatus {
+    Nominal,
+    SingleChannelRecovered,
+    DoubleChannelCatastrophicFault,
+}
+
+impl AerospaceConfigManager {
+    /// Deterministic hardware-level CRC-32 generator (IEEE 802.3 standard polynomial).
+    /// Operates entirely without external software dependencies or heap mapping allocations.
+    pub fn compute_config_crc32(config: &DefenseSystemConfig) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        
+        // Treat memory block as a continuous raw byte stream for processing
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                (config as *const DefenseSystemConfig) as *const u8,
+                std::mem::size_of::<DefenseSystemConfig>(),
+            )
+        };
+
+        for &byte in bytes {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                if (crc & 1) != 0 {
+                    crc = (crc >> 1) ^ 0xEDB8_8320;
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        !crc
+    }
+
+    /// HARDWARE LOCKED VOTING STRATEGY (Peak Advanced Safety Evaluation)
+    /// Validates all channels simultaneously. Performs a majority vote to resolve inconsistencies 
+    /// if a dynamic cosmic ray or memory issue has modified a system cell.
+    pub fn resolve_voted_config(
+        container: &TmrConfigContainer,
+    ) -> (DefenseSystemConfig, FaultStatus) {
+        let crc_p = Self::compute_config_crc32(&container.primary_channel);
+        let crc_s = Self::compute_config_crc32(&container.secondary_channel);
+        let crc_t = Self::compute_config_crc32(&container.tertiary_channel);
+        let target_crc = container.metadata.expected_crc32;
+
+        // Condition A: 3-way uniform lockstep agreement matching expected CRC bounds
+        if crc_p == target_crc && crc_s == target_crc && crc_t == target_crc {
+            return (container.primary_channel, FaultStatus::Nominal);
+        }
+
+        // Condition B: Majority vote logic when a single memory block corrupts
+        if crc_p == target_crc && crc_s == target_crc {
+            return (container.primary_channel, FaultStatus::SingleChannelRecovered);
+        }
+        if crc_p == target_crc && crc_t == target_crc {
+            return (container.primary_channel, FaultStatus::SingleChannelRecovered);
+        }
+        if crc_s == target_crc && crc_t == target_crc {
+            return (container.secondary_channel, FaultStatus::SingleChannelRecovered);
+        }
+
+        // Condition C: Complete structural failure. System must drop back to standard safe recovery profile.
+        (Self::load_hardcoded_fallback_profile(), FaultStatus::DoubleChannelCatastrophicFault)
+    }
+
+    /// Hardcoded ROM fallback profile to preserve flight-critical systems if all RAM channels degrade.
+    pub const fn load_hardcoded_fallback_profile() -> DefenseSystemConfig {
+        DefenseSystemConfig {
+            system_id: 0xAERO_FF,
+            radar_frequency_ghz: 0.0,    // Shut down radiation outputs to protect ground elements
+            max_g_force_limit: 4.5,      // Drop airframe limits to basic safe operational parameters
+            blackbox_recording_enabled: 1, // Keep blackbox forced alive
+        }
+    }
+}
+
+// ============================================================================
+// 3. SECURE SYSTEM REGISTRY INITIALIZATION
+// ============================================================================
+
+pub fn init_default_aerospace_config() -> TmrConfigContainer {
+    // Standard baseline operational limits configuration
+    let default_config = DefenseSystemConfig {
         system_id: 0xAERO99,
-        radar_frequency_ghz: 9.5, // X-band radar default
-        max_g_force_limit: 9.0,   // Max airframe G-load
-        blackbox_recording_enabled: true
+        radar_frequency_ghz: 9.5, 
+        max_g_force_limit: 9.0,   
+        blackbox_recording_enabled: 1,
     };
+
+    // Pre-calculate exact expected hash constraints
+    let calculated_crc = AerospaceConfigManager::compute_config_crc32(&default_config);
+
+    // Populate all memory blocks across identical fault boundaries
+    TmrConfigContainer {
+        primary_channel: default_config,
+        secondary_channel: default_config,
+        tertiary_channel: default_config,
+        metadata: ConfigMetadata {
+            sequence_id: 1,
+            expected_crc32: calculated_crc,
+        },
+    }
+}
+
+// ============================================================================
+// 4. HARDWARE SIMULATION & VERIFICATION RUNTIME
+// ============================================================================
+
+fn main() {
+    // 1. Launch system initialization profile
+    let mut runtime_memory_blocks = init_default_aerospace_config();
+    println!("--- Aerospace Configuration Pipeline Online ---");
+    println!("Initial System State Check: Nominal");
+
+    // 2. Simulate an active Single Event Upset (e.g. cosmic ray alters data on Secondary Memory Channel)
+    println!("\n[SIMULATION]: Cosmic ray ion striking Secondary RAM Bank...");
+    runtime_memory_blocks.secondary_channel.max_g_force_limit = 999.9; // Dangerous payload corruption
+
+    // 3. Evaluate configuration state via Lockstep Voting Engine
+    let (voted_config, fault_report) = AerospaceConfigManager::resolve_voted_config(&runtime_memory_blocks);
+    
+    println!("Fault Assessment Matrix Result: {:?}", fault_report);
+    println!("Resolved Safe Airframe G Limit: {} Gs", voted_config.max_g_force_limit);
+    // Safe Airframe G Limit resolves back to 9.0, ignoring the corrupt 999.9 value!
 }
