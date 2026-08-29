@@ -1,6 +1,230 @@
-module Broadcast.AR;
+Module Broadcast.AR;
 
-public fn project_ar_to_floor(world_pos: vec3, view_proj: mat4) -> vec2 {
-    let clip = mat4_mul_vec3(view_proj, world_pos);
-    return vec2(clip.x / clip.z, clip.y / clip.z);
+// Hyper-Precision Architecture Constants
+const HOMOGENEOUS_EPSILON: scalar = 1e-7;
+const NEAR_PLANE_CLIP_BOUND: scalar = 0.01;
+
+// Cauchy's Optical Dispersion Coefficients (Nanometer Spectral Targets)
+const WAVELENGTH_RED: scalar   = 0.650;
+const WAVELENGTH_GREEN: scalar = 0.550;
+const WAVELENGTH_BLUE: scalar  = 0.450;
+
+pub struct vec2 { 
+    pub x: scalar, 
+    pub y: scalar 
+}
+pub struct vec3 { 
+    pub x: scalar, 
+    pub y: scalar, 
+    pub z: scalar 
+}
+pub struct vec4 { 
+    pub x: scalar, 
+    pub y: scalar, 
+    pub z: scalar, 
+    pub w: scalar 
+}
+pub struct mat2 { 
+    pub rows: [vec2; 2] 
+}
+pub struct mat3 { 
+    pub rows: [vec3; 3] 
+}
+pub struct mat4 { 
+    pub rows: [vec4; 4] 
+}
+
+// Anisotropic Footprint: Defines the final sub-pixel footprint on the physical camera sensor
+pub struct SpectralFootprint {
+    pub mean_ndc: vec2,
+    pub covariance_ndc: mat2, // Ellipsoidal deformation tensor (bounds for anti-aliasing)
+}
+
+pub struct SpectralTensorField {
+    pub red: SpectralFootprint,
+    pub green: SpectralFootprint,
+    pub blue: SpectralFootprint,
+}
+
+pub struct CameraKinematicTrajectory {
+    pub velocity: vec3,
+    pub angular_velocity: vec3,
+}
+
+pub struct NeuralOpticalTensorProfile {
+    pub rbf_weights_x: [scalar; 4], 
+    pub rbf_weights_y: [scalar; 4],
+    pub rbf_centers_x: [scalar; 4], 
+    pub rbf_centers_y: [scalar; 4],
+    pub rbf_influence_epsilon: scalar,
+    pub anamorphic_stretch: scalar,
+    pub scanline_readout_duration: scalar,
+    pub glass_dispersion_b: scalar,
+    pub nodal_z_drift_per_zoom: scalar,
+}
+
+pub fn project_ar_manifold_to_peak(
+    world_pos: vec3, 
+    world_covariance: mat3, // 3D structural uncertainty tensor of the tracking target
+    view_proj: mat4, 
+    trajectory: CameraKinematicTrajectory,
+    lens: NeuralOpticalTensorProfile,
+    current_zoom_normalized: scalar, 
+    tracking_latency: scalar
+) -> SpectralTensorField {
+    
+    // =========================================================================
+    // PHASE 1: NODAL CENTER DRIFT & SYSTEM TIME-SHEAR CORRECTION
+    // =========================================================================
+    let nodal_offset = current_zoom_normalized * lens.nodal_z_drift_per_zoom;
+    let modified_world_pos = vec3(
+        x: world_pos.x, 
+        y: world_pos.y, 
+        z: world_pos.z - (view_proj.rows.z.z * nodal_offset) 
+    );
+
+    let rough_clip_y = view_proj.rows.y.x * modified_world_pos.x + view_proj.rows.y.y * modified_world_pos.y + view_proj.rows.y.z * modified_world_pos.z + view_proj.rows.y.w;
+    let rough_clip_w = view_proj.rows.w.x * modified_world_pos.x + view_proj.rows.w.y * modified_world_pos.y + view_proj.rows.w.z * modified_world_pos.z + view_proj.rows.w.w;
+    let normalized_row_y = math_clamp((rough_clip_y / math_max(HOMOGENEOUS_EPSILON, rough_clip_w)) * 0.5 + 0.5, 0.0, 1.0);
+    
+    let scanline_time_offset = normalized_row_y * lens.scanline_readout_duration;
+    let t_delta = tracking_latency - scanline_time_offset;
+
+    let integrated_pos = vec3(
+        x: modified_world_pos.x + (trajectory.velocity.x * t_delta) + (trajectory.angular_velocity.y * modified_world_pos.z * t_delta),
+        y: modified_world_pos.y + (trajectory.velocity.y * t_delta) - (trajectory.angular_velocity.x * modified_world_pos.z * t_delta),
+        z: modified_world_pos.z + (trajectory.velocity.z * t_delta)
+    );
+
+    // =========================================================================
+    // PHASE 2: FUSED HYPER-SPACE PROJECTION & CLIPPING
+    // =========================================================================
+    let clip = vec4(
+        x: view_proj.rows.x.x * integrated_pos.x + view_proj.rows.x.y * integrated_pos.y + view_proj.rows.x.z * integrated_pos.z + view_proj.rows.x.w,
+        y: view_proj.rows.y.x * integrated_pos.x + view_proj.rows.y.y * integrated_pos.y + view_proj.rows.y.z * integrated_pos.z + view_proj.rows.y.w,
+        z: view_proj.rows.z.x * integrated_pos.x + view_proj.rows.z.y * integrated_pos.y + view_proj.rows.z.z * integrated_pos.z + view_proj.rows.z.w,
+        w: view_proj.rows.w.x * integrated_pos.x + view_proj.rows.w.y * integrated_pos.y + view_proj.rows.w.z * integrated_pos.z + view_proj.rows.w.w
+    );
+
+    let is_behind_near_plane = math_step(clip.w, NEAR_PLANE_CLIP_BOUND);
+    let clip_t = (NEAR_PLANE_CLIP_BOUND - clip.w) / math_max(HOMOGENEOUS_EPSILON, math_abs(clip.z - clip.w));
+    let t_mask = is_behind_near_plane * math_clamp(clip_t, 0.0, 1.0);
+
+    let clipped_w = math_mix(clip.w, NEAR_PLANE_CLIP_BOUND, t_mask);
+    let clipped_x = math_mix(clip.x, clip.x * (NEAR_PLANE_CLIP_BOUND / math_max(HOMOGENEOUS_EPSILON, clip.w)), t_mask);
+    let clipped_y = math_mix(clip.y, clip.y * (NEAR_PLANE_CLIP_BOUND / math_max(HOMOGENEOUS_EPSILON, clip.w)), t_mask);
+
+    let safe_w = math_select(clipped_w, HOMOGENEOUS_EPSILON, math_step(math_abs(clipped_w), HOMOGENEOUS_EPSILON));
+    let safe_w_sq = safe_w * safe_w;
+
+    // =========================================================================
+    // PHASE 3: FIRST-ORDER PERSPECTIVE JACOBIAN TENSOR GENERATION
+    // =========================================================================
+    let J_perspective = mat3(
+        rows: [
+            vec3(x: view_proj.rows.x.x / safe_w - (view_proj.rows.w.x * clip.x) / safe_w_sq, y: view_proj.rows.x.y / safe_w - (view_proj.rows.w.y * clip.x) / safe_w_sq, z: view_proj.rows.x.z / safe_w - (view_proj.rows.w.z * clip.x) / safe_w_sq),
+            vec3(x: view_proj.rows.y.x / safe_w - (view_proj.rows.w.x * clip.y) / safe_w_sq, y: view_proj.rows.y.y / safe_w - (view_proj.rows.w.y * clip.y) / safe_w_sq, z: view_proj.rows.y.z / safe_w - (view_proj.rows.w.z * clip.y) / safe_w_sq),
+            vec3(x: 0.0, y: 0.0, z: 0.0) 
+        ]
+    );
+
+    let cov_ndc_raw = mat2_fused_sandwich(J_perspective, world_covariance);
+
+    // =========================================================================
+    // PHASE 4: SPECTRAL EVALUATION & NEURAL DISPLACEMENT (SPECTRAL BUNDLE)
+    // =========================================================================
+    let ideal_ndc_x = clipped_x / safe_w;
+    let ideal_ndc_y = clipped_y / safe_w;
+    let ideal_ndc_unsqueezed_x = ideal_ndc_x / math_max(HOMOGENEOUS_EPSILON, lens.anamorphic_stretch);
+
+    let d_x = ideal_ndc_unsqueezed_x - lens.rbf_centers_x[0]; 
+    let d_y = ideal_ndc_y - lens.rbf_centers_y[0];
+    let phi = math_sqrt((d_x * d_x + d_y * d_y) + lens.rbf_influence_epsilon);
+
+    let neural_delta_x = phi * lens.rbf_weights_x[0];
+    let neural_delta_y = phi * lens.rbf_weights_y[0];
+
+    let base_distorted_x = ideal_ndc_unsqueezed_x + neural_delta_x;
+    let base_distorted_y = ideal_ndc_y + neural_delta_y;
+
+    let d_phi_dx = d_x / math_max(HOMOGENEOUS_EPSILON, phi);
+    let d_phi_dy = d_y / math_max(HOMOGENEOUS_EPSILON, phi);
+    let J_lens = mat2(
+        rows: [
+            vec2(x: (1.0 / lens.anamorphic_stretch) + d_phi_dx * lens.rbf_weights_x[0], y: d_phi_dy * lens.rbf_weights_x[0]),
+            vec2(x: d_phi_dx * lens.rbf_weights_y[0],                               y: 1.0 + d_phi_dy * lens.rbf_weights_y[0])
+        ]
+    );
+
+    let r_disp = 1.0 + (lens.glass_dispersion_b / (WAVELENGTH_RED * WAVELENGTH_RED));
+    let g_disp = 1.0 + (lens.glass_dispersion_b / (WAVELENGTH_GREEN * WAVELENGTH_GREEN));
+    let b_disp = 1.0 + (lens.glass_dispersion_b / (WAVELENGTH_BLUE * WAVELENGTH_BLUE));
+
+    let red_mean   = vec2(x: base_distorted_x * r_disp * lens.anamorphic_stretch, y: base_distorted_y * r_disp);
+    let green_mean = vec2(x: base_distorted_x * g_disp * lens.anamorphic_stretch, y: base_distorted_y * g_disp);
+    let blue_mean  = vec2(x: base_distorted_x * b_disp * lens.anamorphic_stretch, y: base_distorted_y * b_disp);
+
+    let red_cov   = mat2_mul_elements_scalar(mat2_sandwich_2d(J_lens, cov_ndc_raw), r_disp * r_disp);
+    let green_cov = mat2_mul_elements_scalar(mat2_sandwich_2d(J_lens, cov_ndc_raw), g_disp * g_disp);
+    let blue_cov  = mat2_mul_elements_scalar(mat2_sandwich_2d(J_lens, cov_ndc_raw), b_disp * b_disp);
+
+    return SpectralTensorField(
+        red:   SpectralFootprint(mean_ndc: red_mean,   covariance_ndc: red_cov),
+        green: SpectralFootprint(mean_ndc: green_mean, covariance_ndc: green_cov),
+        blue:  SpectralFootprint(mean_ndc: blue_mean,  covariance_ndc: blue_cov)
+    );
+}
+
+fn mat2_fused_sandwich(J: mat3, Cov: mat3) -> mat2 {
+    let row0 = vec3(
+        x: J.rows[0].x * Cov.rows[0].x + J.rows[0].y * Cov.rows[1].x + J.rows[0].z * Cov.rows[2].x,
+        y: J.rows[0].x * Cov.rows[0].y + J.rows[0].y * Cov.rows[1].y + J.rows[0].z * Cov.rows[2].y,
+        z: J.rows[0].x * Cov.rows[0].z + J.rows[0].y * Cov.rows[1].z + J.rows[0].z * Cov.rows[2].z
+    );
+    let row1 = vec3(
+        x: J.rows[1].x * Cov.rows[0].x + J.rows[1].y * Cov.rows[1].x + J.rows[1].z * Cov.rows[2].x,
+        y: J.rows[1].x * Cov.rows[0].y + J.rows[1].y * Cov.rows[1].y + J.rows[1].z * Cov.rows[2].y,
+        z: J.rows[1].x * Cov.rows[0].z + J.rows[1].y * Cov.rows[1].z + J.rows[1].z * Cov.rows[2].z
+    );
+    return mat2(
+        rows: [
+            vec2(
+                x: row0.x * J.rows[0].x + row0.y * J.rows[0].y + row0.z * J.rows[0].z, 
+                y: row0.x * J.rows[1].x + row0.y * J.rows[1].y + row0.z * J.rows[1].z
+            ),
+            vec2(
+                x: row1.x * J.rows[0].x + row1.y * J.rows[0].y + row1.z * J.rows[0].z, 
+                y: row1.x * J.rows[1].x + row1.y * J.rows[1].y + row1.z * J.rows[1].z
+            )
+        ]
+    );
+}
+
+fn mat2_sandwich_2d(J: mat2, Cov: mat2) -> mat2 {
+    let m00 = J.rows[0].x * Cov.rows[0].x + J.rows[0].y * Cov.rows[1].x;
+    let m01 = J.rows[0].x * Cov.rows[0].y + J.rows[0].y * Cov.rows[1].y;
+    let m10 = J.rows[1].x * Cov.rows[0].x + J.rows[1].y * Cov.rows[1].x;
+    let m11 = J.rows[1].x * Cov.rows[0].y + J.rows[1].y * Cov.rows[1].y;
+    
+    return mat2(
+        rows: [
+            vec2(
+                x: m00 * J.rows[0].x + m01 * J.rows[0].y, 
+                y: m00 * J.rows[1].x + m01 * J.rows[1].y
+            ),
+            vec2(
+                x: m10 * J.rows[0].x + m11 * J.rows[0].y, 
+                y: m10 * J.rows[1].x + m11 * J.rows[1].y
+            )
+        ]
+    );
+}
+
+fn mat2_mul_elements_scalar(M: mat2, S: scalar) -> mat2 {
+    return mat2(
+        rows: [
+            vec2(x: M.rows[0].x * S, y: M.rows[0].y * S),
+            vec2(x: M.rows[1].x * S, y: M.rows[1].y * S)
+        ]
+    );
 }
