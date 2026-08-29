@@ -1,17 +1,254 @@
-module Gameplay.Abilities;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
-struct Ability {
-    ability_id: u32,
-    cooldown: f32,
-    stamina_cost: f32,
-    current_cd: f32
+// ============================================================================
+// 1. THE ARCHITECTURAL BEDROCK: HIERARCHICAL GAMEPLAY TAGS
+// ============================================================================
+
+/// Gameplay Tags represent states, conditions, or groupings (e.g., "State.Debuff.Silenced").
+/// They allow infinite, dynamic classification of state without changing structs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GameplayTag(pub String);
+
+impl GameplayTag {
+    /// Checks if a tag matches or is a child of another tag (e.g., "State.Debuff.Silenced" matches "State.Debuff")
+    pub fn matches(&self, parent: &GameplayTag) -> bool {
+        self.0 == parent.0 || self.0.starts_with(&format!("{}.", parent.0))
+    }
 }
 
-public fn cast_ability(mut ability: Ability, mut stamina: f32) -> bool {
-    if ability.current_cd <= 0.0 && stamina >= ability.stamina_cost {
-        stamina -= ability.stamina_cost;
-        ability.current_cd = ability.cooldown;
-        return true;
+// ============================================================================
+// 2. THE CONTEXTUAL TRANSACTION LAYER
+// ============================================================================
+
+/// Every calculation needs context. Who is casting? Who is the target? What weapon?
+pub struct GameplayEffectContext {
+    pub instigator: *const Entity,
+    pub target: *const Entity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModifierOp { Add, Multiply, Override }
+
+/// Allows runtime modifications to raw numbers (e.g., Gear adding +10 Max Mana, or Buff multiplying damage by 1.5)
+pub struct AttributeModifier {
+    pub op: ModifierOp,
+    pub value: f32,
+}
+
+// ============================================================================
+// 3. THE DYNAMIC ENTITY ENGINE
+// ============================================================================
+
+#[derive(Debug, Clone, Default)]
+pub struct Entity {
+    /// Flat properties ("Mana", "Health", "Stamina", "Cooldown.Fireball")
+    pub base_attributes: HashMap<String, f32>,
+    /// Global temporary states currently applied to this entity
+    pub applied_tags: HashSet<GameplayTag>,
+}
+
+impl Entity {
+    pub fn new() -> Self {
+        Self::default()
     }
-    return false;
+
+    /// Resolves an attribute value after evaluating active modifiers dynamically
+    pub fn get_attribute(&self, attribute_id: &str, modifiers: &[AttributeModifier]) -> f32 {
+        let mut base = *self.base_attributes.get(attribute_id).unwrap_or(&0.0);
+        
+        // 1. Apply additions
+        for modif in modifiers.iter().filter(|m| m.op == ModifierOp::Add) {
+            base += modif.value;
+        }
+        // 2. Apply multiplications
+        for modif in modifiers.iter().filter(|m| m.op == ModifierOp::Multiply) {
+            base *= modif.value;
+        }
+        // 3. Apply overrides
+        for modif in modifiers.iter().filter(|m| m.op == ModifierOp::Override) {
+            base = modif.value;
+        }
+        base
+    }
+
+    pub fn set_attribute(&mut self, attribute_id: &str, value: f32) {
+        self.base_attributes.insert(attribute_id.to_string(), value);
+    }
+}
+
+// ============================================================================
+// 4. INFINITE SYSTEM COMPONENT TRAITS
+// ============================================================================
+
+pub trait GameplayAbilityRequirement {
+    fn is_satisfied(&self, entity: &Entity, context: &GameplayEffectContext) -> bool;
+}
+
+pub trait GameplayAbilityCost {
+    /// Simulates whether the resource is available, taking external context modifiers into account
+    fn check_cost(&self, entity: &Entity, context: &GameplayEffectContext) -> bool;
+    /// Consumes the cost definitively
+    fn apply_cost(&self, entity: &mut Entity, context: &GameplayEffectContext);
+}
+
+pub trait GameplayAbilityExecution {
+    fn execute(&self, entity: &mut Entity, context: &GameplayEffectContext);
+}
+
+// ============================================================================
+// 5. THE PEAK ABILITY EXECUTOR
+// ============================================================================
+
+pub struct UltimateAbility {
+    pub ability_id: u32,
+    /// Conditions checking tags or environment constraints
+    pub requirements: Vec<Box<dyn GameplayAbilityRequirement>>,
+    /// Multi-resource requirements (Stamina, Mana, Gold, Charges)
+    pub costs: Vec<Box<dyn GameplayAbilityCost>>,
+    /// Dynamic game-world side-effects (Spawn projectiles, apply buffs, deal damage)
+    pub effects: Vec<Box<dyn GameplayAbilityExecution>>,
+}
+
+impl UltimateAbility {
+    /// Evaluates, simulates, verifies, and atomically commits the ability cycle.
+    pub fn try_activate(&self, entity: &mut Entity, context: &GameplayEffectContext) -> bool {
+        // Step 1: Evaluate structural preconditions/tags
+        for req in &self.requirements {
+            if !req.is_satisfied(entity, context) {
+                return false;
+            }
+        }
+
+        // Step 2: Validate all resource layers
+        for cost in &self.costs {
+            if !cost.check_cost(entity, context) {
+                return false;
+            }
+        }
+
+        // Step 3: Transaction Passed - Apply resource cost mutations atomically
+        for cost in &self.costs {
+            cost.apply_cost(entity, context);
+        }
+
+        // Step 4: Execute payloads/effects
+        for effect in &self.effects {
+            effect.execute(entity, context);
+        }
+
+        true
+    }
+}
+
+// ============================================================================
+// 6. PRODUCTION CONCRETE IMPLEMENTATIONS
+// ============================================================================
+
+/// Conditional Check: Verifies if the entity possesses blocked tags (e.g., Cannot cast while Stunned)
+pub struct TagRequirement {
+    pub required_absent: Vec<GameplayTag>,
+    pub required_present: Vec<GameplayTag>,
+}
+
+impl GameplayAbilityRequirement for TagRequirement {
+    fn is_satisfied(&self, entity: &Entity, _context: &GameplayEffectContext) -> bool {
+        for t in &self.required_absent {
+            if entity.applied_tags.iter().any(|applied| applied.matches(t)) {
+                return false; // Found a blocking tag
+            }
+        }
+        for t in &self.required_present {
+            if !entity.applied_tags.iter().any(|applied| applied.matches(t)) {
+                return false; // Missing a required tag
+            }
+        }
+        true
+    }
+}
+
+/// Dynamic Cost: Subtracts a resource value while accounting for external dynamic reduction rules
+pub struct ContextualCost {
+    pub attribute: String,
+    pub base_cost: f32,
+}
+
+impl GameplayAbilityCost for ContextualCost {
+    fn check_cost(&self, entity: &Entity, _context: &GameplayEffectContext) -> bool {
+        // Querying active gameplay modifiers (For example: simulated ring reduces mana costs by 20%)
+        let reduction_modifier = AttributeModifier { op: ModifierOp::Multiply, value: 0.8 }; 
+        let final_cost = entity.get_attribute(&self.attribute, &[reduction_modifier]);
+        
+        entity.get_attribute(&self.attribute, &[]) >= final_cost
+    }
+
+    fn apply_cost(&self, entity: &mut Entity, _context: &GameplayEffectContext) {
+        let reduction_modifier = AttributeModifier { op: ModifierOp::Multiply, value: 0.8 }; 
+        let final_cost = entity.get_attribute(&self.attribute, &[reduction_modifier]);
+        let remaining = entity.get_attribute(&self.attribute, &[]) - final_cost;
+        entity.set_attribute(&self.attribute, remaining);
+    }
+}
+
+/// Dynamic Payload: Overrides an attribute value (e.g., applies a cooldown timer)
+pub struct SetCooldownEffect {
+    pub cooldown_attribute: String,
+    pub duration: f32,
+}
+
+impl GameplayAbilityExecution for SetCooldownEffect {
+    fn execute(&self, entity: &mut Entity, _context: &GameplayEffectContext) {
+        entity.set_attribute(&self.colldown_attribute_name(), self.duration);
+    }
+}
+
+impl SetCooldownEffect {
+    fn colldown_attribute_name(&self) -> String {
+        format!("Cooldown.{}", self.cooldown_attribute)
+    }
+}
+
+// ============================================================================
+// 7. VERIFICATION
+// ============================================================================
+
+fn main() {
+    let mut mage = Entity::new();
+    mage.set_attribute("Mana", 100.0);
+    mage.set_attribute("Cooldown.Firestorm", 0.0);
+    
+    // Add a state constraint tag to the user
+    mage.applied_tags.insert(GameplayTag("State.Debuff.Silenced".to_string()));
+
+    let ctx = GameplayEffectContext { instigator: &mage, target: &mage };
+
+    // Set up Peak Ultimate Ability Archetype
+    let firestorm = UltimateAbility {
+        ability_id: 999,
+        requirements: vec![
+            Box::new(TagRequirement {
+                required_absent: vec![GameplayTag("State.Debuff.Silenced".into())], // Failure vector
+                required_present: vec![],
+            })
+        ],
+        costs: vec![
+            Box::new(ContextualCost { attribute: "Mana".into(), base_cost: 50.0 })
+        ],
+        effects: vec![
+            Box::new(SetCooldownEffect { cooldown_attribute: "Firestorm".into(), duration: 30.0 })
+        ],
+    };
+
+    // Attempt 1: Should fail because the mage is Silenced
+    let execution_1 = firestorm.try_activate(&mut mage, &ctx);
+    println!("Activation 1 (Silenced Mage) Success: {} (Expected False)", execution_1);
+
+    // Cleanse silence debuff
+    mage.applied_tags.remove(&GameplayTag("State.Debuff.Silenced".to_string()));
+
+    // Attempt 2: Mage is cleansed. 50 Base cost becomes 40 because of the 20% reduction modifier inside ContextualCost.
+    let execution_2 = firestorm.try_activate(&mut mage, &ctx);
+    println!("\nActivation 2 (Cleansed Mage) Success: {} (Expected True)", execution_2);
+    println!("Remaining Mana: {} (Expected 60.0)", mage.get_attribute("Mana", &[]));
+    println!("Firestorm Cooldown Remaining: {}s", mage.get_attribute("Cooldown.Firestorm", &[]));
 }
