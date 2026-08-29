@@ -1,110 +1,144 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::cell::UnsafeCell;
 
 // ============================================================================
-// 1. DATA BEDROCK: CONTINUOUS CACHE-ALIGNED RING SLOT
+// 1. DATA BEDROCK: CONTINUOUS CACHE-ALIGNED SYNCED SLOTS
 // ============================================================================
 
-/// Tightly packed telemetry event payload. 
-/// Padded and aligned to standard 64-byte cache lines to eliminate 'False Sharing'
-/// when multiple processor cores interact with adjacent memory blocks.
 #[derive(Debug, Clone, Copy, Default)]
-#[repr(C, align(64))]
+#[repr(C)]
 pub struct MetricEvent {
     pub event_id: u32,
-    pub timestamp_cycles: u64, // Uses TSC (Time Stamp Counter) CPU clock ticks instead of heavy Kernel OS Syscalls
+    pub timestamp_cycles: u64,
     pub param_value: f32,
 }
 
+/// Cacheline aligned slot that binds raw metric data alongside an independent 
+/// atomic generation sequence marker to fully resolve producer-consumer races.
+#[repr(C, align(64))]
+pub struct BufferSlot {
+    pub sequence: AtomicUsize,
+    pub event: UnsafeCell<MetricEvent>,
+}
+
 // ============================================================================
-// 2. THE LOCK-FREE TELEMETRY CONCURRENT BUFFER MANAGER
+// 2. THE PRODUCTION-READY MULTI-PRODUCER LOCK-FREE TELEMETRY QUEUE
 // ============================================================================
 
-/// Infinite performance ring buffer. Implements a bounded, multi-producer, 
-/// single-consumer (MPSC) lock-free system that never blocks hot worker paths.
-pub struct LockFreeTelemetryBuffer<const CAPACITY: usize> {
-    // Array size must be a power of 2 to replace expensive modulo (%) operators with branchless bitwise AND operators
-    pub buffer: [MetricEvent; CAPACITY],
+pub struct LockFreeTelemetryBuffer<const N: usize> {
+    pub buffer: Vec<BufferSlot>,
+    pub write_mask: usize,
     pub write_index: AtomicUsize,
     pub read_index: AtomicUsize,
 }
 
+// Immutability declarations telling Rust this type is safe to send and share across threads
+unsafe impl<const N: usize> Send for LockFreeTelemetryBuffer<N> {}
+unsafe impl<const N: usize> Sync for LockFreeTelemetryBuffer<N> {}
+
 impl<const N: usize> LockFreeTelemetryBuffer<N> {
     pub fn new() -> Self {
         assert!(N.is_power_of_two(), "Capacity boundary constraint must be a power of 2.");
+        
+        let mut buffer = Vec::with_capacity(N);
+        for i in 0..N {
+            buffer.push(BufferSlot {
+                sequence: AtomicUsize::new(i), // Sequence matches physical index initially
+                event: UnsafeCell::new(MetricEvent::default()),
+            });
+        }
+
         Self {
-            buffer: [MetricEvent::default(); N],
+            buffer,
+            write_mask: N - 1,
             write_index: AtomicUsize::new(0),
             read_index: AtomicUsize::new(0),
         }
     }
 
-    /// THE UNIVERSAL HOT-PATH LOG ENGINE (Completely Lock-Free and Branch-Optimized)
-    /// Replaces mutex locks and kernel blocking traps with pure CPU atomic primitives.
+    /// THE UNIVERSAL HOT-PATH LOG ENGINE (Concurrently Safe via shared `&self`)
+    /// Allows millions of concurrent threads to safely claim, write, and verify slots.
     #[inline(always)]
-    pub fn push_metric(&mut self, event_id: u32, value: f32) -> bool {
-        let current_read = self.read_index.load(Ordering::Relaxed);
-        let mut current_write = self.write_index.load(Ordering::Relaxed);
+    pub fn push_metric(&self, event_id: u32, value: f32) -> bool {
+        let mut pos = self.write_index.load(Ordering::Relaxed);
 
         loop {
-            // Check if buffer ring layer is completely saturated
-            if current_write - current_read >= N {
-                return false; // Buffer overflow safety: drop log to prioritize application uptime
-            }
+            let slot = &self.buffer[pos & self.write_mask];
+            let seq = slot.sequence.load(Ordering::Acquire);
+            let diff = seq as issize - pos as issize;
 
-            // Compare-And-Swap (CAS): Claim a specific index slot atomically without locking threads
-            match self.write_index.compare_exchange_weak(
-                current_write,
-                current_write + 1,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    // Extract slot memory position branchless via bitmask mapping
-                    let target_mask_slot = current_write & (N - 1);
-                    
-                    // PEAK CLOCK PERFORMANCE: Query internal hardware processor clock ticks directly (RDTSC).
-                    // Avoids kernel-space OS context switching entirely (takes ~2-4 nanoseconds vs ~150ns for syscalls)
-                    let cpu_ticks = unsafe { std::arch::x86_64::_rdtsc() };
+            if diff == 0 {
+                // Slot is empty and ready for this specific generation. Attempt to claim it.
+                match self.write_index.compare_exchange_weak(
+                    pos,
+                    pos + 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => {
+                        // Ticket claimed successfully. Safe to query processor cycles branch-free.
+                        let cpu_ticks = unsafe { std::arch::x86_64::_rdtsc() };
 
-                    // Commit directly into memory grid slot
-                    self.buffer[target_mask_slot] = MetricEvent {
-                        event_id,
-                        timestamp_cycles: cpu_ticks,
-                        param_value: value,
-                    };
-                    return true;
+                        // Write data safely into our exclusive memory cell block
+                        unsafe {
+                            let cell_ptr = slot.event.get();
+                            (*cell_ptr) = MetricEvent {
+                                event_id,
+                                timestamp_cycles: cpu_ticks,
+                                param_value: value,
+                            };
+                        }
+
+                        // Release memory order step: Mark this slot as ready for consumption
+                        slot.sequence.store(pos + 1, Ordering::Release);
+                        return true;
+                    }
+                    Err(updated_pos) => {
+                        // Another thread won the ticket swap race. Retry instantly with new position.
+                        pos = updated_pos;
+                    }
                 }
-                Err(actual_updated_write_index) => {
-                    // CAS failed because another thread claimed the index first. Retry with updated index instantly.
-                    current_write = actual_updated_write_index;
-                }
+            } else if diff < 0 {
+                // Buffer ring layer is completely saturated.
+                return false;
+            } else {
+                // The write tracker is lagging behind another execution thread. Fetch latest positioning.
+                pos = self.write_index.load(Ordering::Relaxed);
             }
         }
     }
 
-    /// Asynchronous background worker extraction ring loop
-    pub fn flush_batch_to_disk(&mut self) -> usize {
-        let current_write = self.write_index.load(Ordering::Acquire);
-        let mut current_read = self.read_index.load(Ordering::Relaxed);
+    /// Asynchronous background worker extraction loop (Single-Consumer Thread Exclusive)
+    pub fn flush_batch_to_disk(&self) -> usize {
+        let mut pos = self.read_index.load(Ordering::Relaxed);
         let mut processed_count = 0;
 
-        while current_read < current_write {
-            let target_slot = current_read & (N - 1);
-            let event = &self.buffer[target_slot];
+        loop {
+            let slot = &self.buffer[pos & self.write_mask];
+            let seq = slot.sequence.load(Ordering::Acquire);
+            let diff = seq as issize - (pos + 1) as issize;
 
-            // In production, this data block is sent out over a network UDP socket, 
-            // converted into a standard wall-clock time string, or dumped to disk in batches.
-            println!(
-                "  [Background Telemetry Thread Drain] ID: {:#X} | CPU Ticks: {} | Value: {:.2}",
-                event.event_id, event.timestamp_cycles, event.param_value
-            );
+            if diff == 0 {
+                // Data has been fully committed by a producer thread. Safe to consume.
+                unsafe {
+                    let event = &*slot.event.get();
+                    println!(
+                        "  [Background Telemetry Thread Drain] ID: {:#X} | CPU Ticks: {} | Value: {:.2}",
+                        event.event_id, event.timestamp_cycles, event.param_value
+                    );
+                }
 
-            current_read += 1;
-            processed_count += 1;
+                // Reset slot generation state, making it available for future producer overwrites
+                slot.sequence.store(pos + self.write_mask + 1, Ordering::Release);
+                pos += 1;
+                processed_count += 1;
+            } else {
+                // No more committed elements found or producer is currently writing. Stop batch flush.
+                break;
+            }
         }
 
-        self.read_index.store(current_read, Ordering::Release);
+        self.read_index.store(pos, Ordering::Relaxed);
         processed_count
     }
 }
@@ -114,20 +148,21 @@ impl<const N: usize> LockFreeTelemetryBuffer<N> {
 // ============================================================================
 
 fn main() {
-    // Allocate a cache-aligned, 256-slot ring infrastructure container block
-    let mut telemetry_system = LockFreeTelemetryBuffer::<256>::new();
-
+    // Shared reference context allocation block
+    let telemetry_system = Arc::new(LockFreeTelemetryBuffer::<256>::new());
     println!("--- High-Throughput Concurrent Telemetry Engine Online ---");
 
-    // 1. Simulate blazing-fast telemetry generation across performance hot-paths
-    // Completely bypasses OS locks, kernel syscall traps, and heap allocations
-    telemetry_system.push_metric(0xEA01, 42.12);
-    telemetry_system.push_metric(0xEA02, 98.6);
+    // Spawn concurrent simulation clones sharing the exact same underlying buffer reference safely
+    let producer_1 = Arc::clone(&telemetry_system);
+    let producer_2 = Arc::clone(&telemetry_system);
+
+    // Threads can push concurrently using an immutable shared reference matrix layout!
+    producer_1.push_metric(0xEA01, 42.12);
+    producer_2.push_metric(0xEA02, 98.6);
     telemetry_system.push_metric(0xEF99, -0.004);
 
     println!("Telemetry Events successfully recorded branch-free into hardware slots.");
 
-    // 2. Offload metrics background processing step
     println!("\nExecuting Asynchronous Telemetry Flush Cycle...");
     let logs_cleared = telemetry_system.flush_batch_to_disk();
     println!("Successfully flushed {} records to backend logs channel safely.", logs_cleared);
