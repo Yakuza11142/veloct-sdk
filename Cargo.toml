@@ -1,23 +1,17 @@
-[workspace]
-resolver = "2"
-members = [
-    "core_engine_pipeline",
-    "spatial_ar_pipeline",
-    "infrastructure_benchmarks"
-]
-
-[workspace.package]
-version = "2.1.0"
+[package]
+name = "core_engine_pipeline"
+version = "1.0.0"
 edition = "2021"
 authors = ["Proprietary Software Engineering Core"]
 license = "Proprietary"
 publish = false
 
-[workspace.dependencies]
-# High-Throughput Data Serialization Core
+[dependencies]
+# Zero-Allocation Data Serialization Core
 serde = { version = "1.0.204", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1.0.120", default-features = false, features = ["alloc"] }
 
+[dev-dependencies]
 # System Benchmarking Primitives
 criterion = { version = "0.5.1", default-features = false, features = ["html_reports", "cargo_bench_support"] }
 
@@ -27,7 +21,7 @@ criterion = { version = "0.5.1", default-features = false, features = ["html_rep
 
 [profile.release]
 opt-level = 3             # Force absolute hardware-level vector and SIMD loop optimizations
-lto = "fat"               # Enable Link-Time Optimization globally across all workspace crates
+lto = "fat"               # Enable Link-Time Optimization globally across all compiler units
 codegen-units = 1         # Restrict code generation to a single unit to maximize aggressive inlining
 panic = "abort"           # Strip heavy stack unwinding tracking tables for safety-critical determinism
 strip = "symbols"         # Strip all debug tracking markers and symbols to compress the binary footprint
