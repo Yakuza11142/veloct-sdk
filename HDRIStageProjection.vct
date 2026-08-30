@@ -1,10 +1,67 @@
-module Lighting.HDRI;
+// ============================================================================
+// 1. DATA CORE: PACKED UNIFORM ENVIRONMENT PROPERTIES
+// ============================================================================
 
-[GPUCompute]
-public kernel fn sample_hdri_environment(mut out_radiance: [vec3], ray_dirs: [vec3]) {
-    let idx = dispatch_thread_id_x();
-    let dir = ray_dirs[idx];
-    let u = 0.5 + (math_atan2(dir.z, dir.x) / 6.283185);
-    let v = 0.5 - (math_asin(dir.y) / 3.141592);
-    out_radiance[idx] = sample_equirectangular(u, v);
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics constant buffers
+struct HdriPipelineParameters {
+    float2 display_resolution;  // Viewport dimensions in pixels (e.g., 3840.0, 2160.0)
+    float  environment_exposure;// Master linear gain multiplier for high-dynamic range scaling
+    uint   max_mip_level;       // Maximum pre-filtered roughness mip level target [0 - 10]
+};
+
+// ============================================================================
+// 2. RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+TextureCube<float4> PreﬁlteredSpecularMap : register(t0); // Pre-filtered HDRI Cubemap Texture Array
+SamplerState        LinearClampSampler     : register(s0); // Hardware texture sampler configuration
+
+RWTexture2D<float4> OutputRadianceBuffer   : register(u0); // Target deferred lighting buffer frame
+
+// ============================================================================
+// 3. THE PEAK COMPUTE KERNEL: BRANCHLESS HARDWARE VECTOR PROJECTION
+// ============================================================================
+
+/// Procedurally extracts an absolute 3D Ray Reflection Direction vector from screen UV coordinates.
+/// Completely drops slow CPU buffer passes or raw pointer-chasing array lookups.
+float3 reconstruct_ray_direction(float2 uv, float2 resolution) {
+    float2 ndc = (uv * 2.0) - 1.0;
+    ndc.y = -ndc.y; // Correct viewport orientation mapping lines
+    
+    // Fast procedural projection: assumes a standard 90-degree field of view tracking frame matrix
+    return normalize(float3(ndc.x, ndc.y, 1.0));
+}
+
+[numthreads(16, 16, 1)]
+void ComputeHdriEnvironmentKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<HdriPipelineParameters> config : register(b0)
+) {
+    uint2 screen_coords = dispatch_id.xy;
+    
+    // Safety boundary constraints: prevent unaligned edge execution crashes
+    if (screen_coords.x >= (uint)config.display_resolution.x || screen_coords.y >= (uint)config.display_resolution.y) {
+        return;
+    }
+
+    float2 uv = (float2)screen_coords / config.display_resolution;
+
+    // Step 1: Procedurally generate the 3D ray vector direction branchlessly in constant time
+    // Completely deletes the slow 'ray_dirs' buffer and heavy internal 'atan2/asin' calculations
+    float3 ray_dir = reconstruct_ray_direction(uv, config.display_resolution);
+
+    // Step 2: Sample from the pre-filtered hardware cubemap texture array
+    // Mipmap level selection can be modulated dynamically by surface roughness vectors (for PBR reflections)
+    // SampleLevel forces a specific mip track, optimizing texture cache fetches branchlessly
+    float target_mip_level = 0.0; // Level 0 captures maximum sharp background radiance data
+    float4 environment_sample = PreﬁlteredSpecularMap.SampleLevel(LinearClampSampler, ray_dir, target_mip_level);
+    
+    // Step 3: Apply physical high-dynamic-range exposure scale adjustments
+    float3 final_radiance = environment_sample.rgb * config.environment_exposure;
+
+    // Step 4: Apply Reinhard tone-mapping profile compression to prevent highlight blowout on LED walls
+    final_radiance = final_radiance / (final_radiance + float3(1.0, 1.0, 1.0));
+
+    // Commit final multi-channel frame data back to display buffers branchlessly
+    OutputRadianceBuffer[screen_coords] = float4(final_radiance, 1.0);
 }
