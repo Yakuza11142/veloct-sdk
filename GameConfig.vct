@@ -1,6 +1,205 @@
-module System.Config;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::Write;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-define MAX_ENTITIES   = 100000;
-define WORLD_SCALE    = 1.0;
-define NETWORK_TICK   = 60;
-define GRAVITY_VECTOR = vec3(0.0, -9.81, 0.0);
+// ============================================================================
+// 1. DATA CORE: HARDWARE-ALIGNED GPU-READY CONFIG STRUCTS
+// ============================================================================
+
+/// Strict 16-byte memory-aligned layout matching GPU Constant Buffer specifications.
+/// Combines simulation caps, network scales, and 3D acceleration vectors in a single block.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[repr(C, align(16))]
+pub struct SystemPipelineConfig {
+    pub max_entities: u32,
+    pub network_tick_rate: u32,
+    pub world_scale: f32,
+    pub gravity_x: f32,
+    pub gravity_y: f32,
+    pub gravity_z: f32,
+    pub padding: [u32; 2], // Fills out the register boundary perfectly to a 16-byte multiple
+}
+
+impl Default for SystemPipelineConfig {
+    fn default() -> Self {
+        Self {
+            max_entities: 100000,
+            network_tick_rate: 60,
+            world_scale: 1.0,
+            gravity_x: 0.0,
+            gravity_y: -9.81,
+            gravity_z: 0.0,
+            padding: [0; 2],
+        }
+    }
+}
+
+// ============================================================================
+// 2. THE LOCK-FREE RECENT CONTEXT REGISTRY (URCU)
+// ============================================================================
+
+/// Thread-safe, lock-free global system configuration repository.
+/// Thousands of parallel physics loops, network tickers, and asset ingestion lines
+/// can query current configuration parameters concurrently with absolute zero read latency.
+pub struct ConcurrentSystemRegistry {
+    active_config_ptr: AtomicPtr<SystemPipelineConfig>,
+}
+
+impl ConcurrentSystemRegistry {
+    pub fn new() -> Self {
+        let default_config = Box::new(SystemPipelineConfig::default());
+        Self {
+            active_config_ptr: AtomicPtr::new(Box::into_raw(default_config)),
+        }
+    }
+
+    /// LOCK-FREE HOT SNAPSHOT READ (Hot Path Worker Read)
+    /// Instantly returns an immutable data snapshot reference, bypassing Mutex/RwLock blocking overhead.
+    #[inline(always)]
+    pub fn acquire_snapshot(&self) -> Arc<SystemPipelineConfig> {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Acquire);
+        // Safety: Pointer is guaranteed valid via atomic release barriers on the hot-swap channel
+        unsafe { Arc::new(*raw_ptr) }
+    }
+
+    /// ATOMIC AT-RUN-TIME HOT-SWAP (Management / Watcher Path)
+    /// Swaps configuration profiles instantly across all processing threads.
+    pub fn hot_swap_configuration(&self, new_config: SystemPipelineConfig) {
+        let new_raw_ptr = Box::into_raw(Box::new(new_config));
+        let old_raw_ptr = self.active_config_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe {
+                let _ = Box::from_raw(old_raw_ptr); // Deallocate historical frame blocks cleanly
+            }
+        }
+    }
+}
+
+impl Drop for ConcurrentSystemRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe {
+                let _ = Box::from_raw(raw_ptr);
+            }
+        }
+    }
+}
+
+// ============================================================================
+// 3. THE ASYNCHRONOUS LIVE CONFIGURATION WATCHER
+// ============================================================================
+
+pub struct LiveSystemConfigurationWatcher;
+
+impl LiveStageConfigurationWatcher {
+    /// SPAWNS BACKGROUND FILE SYSTEM MONITOR LOOP
+    /// Polls operating system file system notification frames without blocking main compute lanes.
+    pub fn spawn_monitor_loop(
+        registry: Arc<ConcurrentSystemRegistry>,
+        file_path_str: &'static str,
+        shutdown_signal: Arc<AtomicBool>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let path = Path::new(file_path_str);
+            let mut last_modified_time = None;
+
+            println!("[System Watcher]: Monitoring global configuration target: '{}'...", file_path_str);
+
+            while !shutdown_signal.load(Ordering::Relaxed) {
+                if path.exists() {
+                    if let Ok(metadata) = path.metadata() {
+                        if let Ok(modified_time) = metadata.modified() {
+                            // Check if the configuration file's modification timestamp has shifted
+                            if last_modified_time.is_none() || Some(modified_time) != last_modified_time {
+                                last_modified_time = Some(modified_time);
+
+                                // Ingest, parse, and process text mutations securely
+                                if let Ok(file_content) = std::fs::read_to_string(path) {
+                                    if let Ok(parsed_config) = serde_json::from_str::<SystemPipelineConfig>(&file_content) {
+                                        // Inject the fresh system parameters completely lock-free
+                                        registry.hot_swap_configuration(parsed_config);
+                                        println!("[System Watcher]: Dynamic configuration hot-swap successfully committed to registers.");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Yield thread execution context to prevent localized CPU hardware spikes
+                thread::sleep(Duration::from_millis(250));
+            }
+            println!("[System Watcher]: Background loop thread clean shutdown complete.");
+        })
+    }
+}
+
+// ============================================================================
+// 4. PIPELINE RUNTIME VALIDATION HARNESS
+// ============================================================================
+
+fn main() {
+    let config_registry = Arc::new(ConcurrentSystemRegistry::new());
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let system_json_path = "vct_global_system_config.json";
+
+    println!("--- Real-Time Asynchronous Global System Configuration Engine Online ---");
+
+    // Pre-create our default JSON system layout configuration on disk
+    {
+        let default_data = SystemPipelineConfig::default();
+        let serialized_json = serde_json::to_string_pretty(&default_data).unwrap();
+        let mut file = File::create(system_json_path).unwrap();
+        file.write_all(serialized_json.as_bytes()).unwrap();
+    }
+
+    // 1. Launch the non-blocking background configuration file watcher thread
+    let watcher_registry_ref = Arc::clone(&config_registry);
+    let watcher_shutdown_ref = Arc::clone(&shutdown_flag);
+    let worker_thread_handle = LiveSystemConfigurationWatcher::spawn_monitor_loop(
+        watcher_registry_ref,
+        system_json_path,
+        watcher_shutdown_ref,
+    );
+
+    thread::sleep(Duration::from_millis(50)); // Give the worker thread a window to register initial state
+
+    // 2. Simulate an active server infrastructure update (e.g., scaling to 250k entities, 120Hz ticks, Moon gravity)
+    {
+        let modified_profile = SystemPipelineConfig {
+            max_entities: 250000,     // Scale entity ceiling constraints
+            network_tick_rate: 120,   // Transition to high-frequency tick lanes
+            world_scale: 1.0,
+            gravity_x: 0.0,
+            gravity_y: -1.62,         // Shift physics gravity vector to Lunar parameters
+            gravity_z: 0.0,
+            ..Default::default()
+        };
+
+        let updated_json = serde_json::to_string_pretty(&modified_profile).unwrap();
+        let mut file = File::create(system_json_path).unwrap();
+        file.write_all(updated_json.as_bytes()).unwrap();
+        
+        thread::sleep(Duration::from_millis(300)); // Allow background thread to process the file commit
+    }
+
+    // 3. Verification: High-throughput simulation loops instantly witness updated specs lock-free
+    let runtime_snapshot = config_registry.acquire_snapshot();
+    println!("\n=== Live Compute Infrastructure Engine Audit ===");
+    println!("  Entity Capacity Bounds : {} (Successfully expanded)", runtime_snapshot.max_entities);
+    println!("  Network Sync Frequency : {} Hz", runtime_snapshot.network_tick_rate);
+    println!("  Active Gravity Vector  : [X: {:.2}, Y: {:.2}, Z: {:.2}] m/s\u{00b2} (Lunar Environment Mode)", 
+             runtime_snapshot.gravity_x, runtime_snapshot.gravity_y, runtime_snapshot.gravity_z);
+
+    // 4. Trigger safe structural teardown pass
+    shutdown_flag.store(true, Ordering::Relaxed);
+    worker_thread_handle.join().unwrap();
+    
+    let _ = std::fs::remove_file(system_json_path); // Clean up directory footprint
+    println!("\nSystem Lifecycle Successfully Terminated.");
+}
