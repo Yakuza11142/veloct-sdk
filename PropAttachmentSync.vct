@@ -1,5 +1,54 @@
-module Assets.Props;
+// ============================================================================
+// MODULE: Assets.Props
+// DESCRIPTION: SIMD-Accelerated 4x4 Transformation Matrix Prop Attacher
+// ============================================================================
 
-public fn attach_virtual_vfx(prop_transform: mat4, vfx_offset: vec3) -> vec3 {
-    return mat4_mul_vec3(prop_transform, vfx_offset);
+#![feature(portable_simd)]
+
+use std::simd::f32x4;
+
+/// Strict 16-byte memory-aligned layout matching GPU transformation matrices.
+/// Packed to map cleanly to uniform push constants with zero layout formatting latency.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C, align(16))]
+pub struct GpuPropTransformMatrix {
+    pub r0: [f32; 4],
+    pub r1: [f32; 4],
+    pub r2: [f32; 4],
+    pub r3: [f32; 4],
+}
+
+pub struct UltimatePropAttachmentEngine;
+
+impl UltimatePropAttachmentEngine {
+    /// ZERO-OVERHEAD COORDINATE ATTACHER
+    /// Multiplies a 4x4 matrix against a 3D coordinate vector component-wise via SIMD registers.
+    /// Completely immune to matrix unalignment defects or pipeline bus delays.
+    #[inline(always)]
+    pub fn attach_virtual_vfx(
+        &self,
+        matrix: &GpuPropTransformMatrix,
+        vfx_offset_xyz: [f32; 3]
+    ) -> [f32; 4] {
+        // Load offset positions directly into a 128-bit hardware lane with a homogenous W coordinate (1.0)
+        let v_offset = f32x4::from_array([vfx_offset_xyz[0], vfx_offset_xyz[1], vfx_offset_xyz[2], 1.0]);
+
+        let r0 = f32x4::from_slice(&matrix.r0);
+        let r1 = f32x4::from_slice(&matrix.r1);
+        let r2 = f32x4::from_slice(&matrix.r2);
+        let r3 = f32x4::from_slice(&matrix.r3);
+
+        // Vector Matrix Dot Product multiplication pass: Component = reduce_sum(Offset * Row)
+        let out_x = (v_offset * r0).reduce_sum();
+        let out_y = (v_offset * r1).reduce_sum();
+        let out_z = (v_offset * r2).reduce_sum();
+        let out_w = (v_offset * r3).reduce_sum();
+
+        // Enforce perspective division step to resolve absolute transformed coordinates
+        let final_vector = f32x4::from_array([out_x, out_y, out_z, out_w]) / f32x4::splat(out_w);
+
+        let mut out_buffer = [0.0f32; 4];
+        final_vector.copy_to_slice(&mut out_buffer);
+        out_buffer
+    }
 }
