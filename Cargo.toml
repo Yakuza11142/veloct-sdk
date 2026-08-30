@@ -6,6 +6,10 @@ authors = ["Proprietary Software Engineering Core"]
 license = "Proprietary"
 publish = false
 
+[[bin]]
+name = "vctc"
+path = "src/main.rs"
+
 [dependencies]
 # Zero-Allocation Data Serialization Core
 serde = { version = "1.0.204", default-features = false, features = ["derive", "alloc"] }
