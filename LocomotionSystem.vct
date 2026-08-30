@@ -1,17 +1,72 @@
-module Physics.Locomotion;
+// ============================================================================
+// MODULE: Physics.Locomotion
+// DESCRIPTION: ECS Structure-of-Arrays (SoA) SIMD Gravity & Kinematics Engine
+// ============================================================================
 
-struct LocomotionComponent {
-    position: vec3,
-    velocity: vec3,
-    grounded: bool
+#![feature(portable_simd)] // Unlocks native hardware SIMD vector extension instruction sets
+
+use std::simd::f32x4;
+
+/// High-density packed locomotion mechanics block tracking 4 entities concurrently.
+/// Cache-aligned to 64 bytes to eliminate false sharing and memory-bus cross-talk.
+#[derive(Debug, Clone)]
+#[repr(C, align(64))]
+pub struct LocomotionComponentSoA4 {
+    pub pos_x: [f32; 4],
+    pub pos_y: [f32; 4],
+    pub pos_z: [f32; 4],
+    
+    pub vel_x: [f32; 4],
+    pub vel_y: [f32; 4],
+    pub vel_z: [f32; 4],
+    
+    /// Bitmask configuration tracking grounding layout metrics: 1.0 = Grounded, 0.0 = Airborn/Free
+    pub grounded_state_mask: [f32; 4],
 }
 
-public system LocomotionSystem {
-    query: (mut LocomotionComponent),
-    override fn update(dt: f32, pipeline: mut Pipeline) {
-        pipeline.parallel_for(query, fn(mut loco) {
-            if !loco.grounded { loco.velocity.y -= 9.81 * dt; }
-            loco.position += loco.velocity * dt;
-        });
+pub struct UltimateLocomotionSystem {
+    pub planetary_gravity_y: f32, // Standard acceleration force constant (-9.81 m/s²)
+}
+
+impl UltimateLocomotionSystem {
+    /// PARALLEL LOCOMOTION SOLVER OVERRIDE (Calculates 4 structural entities simultaneously)
+    /// Completely branchless. Replaces scalar if/else loops with a multiplicative selection matrix.
+    #[inline(always)]
+    pub fn step_locomotion_blockx4(&self, active_chunk: &mut LocomotionComponentSoA4, dt: f32) {
+        let dt_vec = f32x4::splat(dt);
+        let safe_zero = f32x4::splat(0.0);
+
+        // 1. Load active tracking streams directly into 128-bit hardware vector registers
+        let mut px = f32x4::from_slice(&active_chunk.pos_x);
+        let mut py = f32x4::from_slice(&active_chunk.pos_y);
+        let mut pz = f32x4::from_slice(&active_chunk.pos_z);
+
+        let mut vx = f32x4::from_slice(&active_chunk.vel_x);
+        let mut vy = f32x4::from_slice(&active_chunk.vel_y);
+        let mut vz = f32x4::from_slice(&active_chunk.vel_z);
+
+        let g_mask = f32x4::from_slice(&active_chunk.grounded_state_mask);
+
+        // 2. BRANCHLESS KINETIC ACCELERATION INGESTION
+        // If an entity is grounded (g_mask == 1.0), the airborn multiplier yields 0.0, zeroing gravity updates.
+        // If airborn (g_mask == 0.0), the airborn multiplier maps to 1.0, engaging gravitational acceleration forces.
+        let airborn_multiplier = f32x4::splat(1.0) - g_mask;
+        let gravity_acceleration_step = f32x4::splat(self.planetary_gravity_y) * dt_vec * airborn_multiplier;
+        
+        vy += gravity_acceleration_step;
+
+        // 3. ATOMIC POSITIONAL TRANSLATION STEP: Position += Velocity * dt
+        px += vx * dt_vec;
+        py += vy * dt_vec;
+        pz += vz * dt_vec;
+
+        // 4. Flush calculated vector metrics directly back into the contiguous array slots
+        px.copy_to_slice(&mut active_chunk.pos_x);
+        py.copy_to_slice(&mut active_chunk.pos_y);
+        pz.copy_to_slice(&mut active_chunk.pos_z);
+
+        vx.copy_to_slice(&mut active_chunk.vel_x);
+        vy.copy_to_slice(&mut active_chunk.vel_y);
+        vz.copy_to_slice(&mut active_chunk.vel_z);
     }
 }
