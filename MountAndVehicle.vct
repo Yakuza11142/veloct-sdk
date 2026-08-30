@@ -1,13 +1,58 @@
-module Vehicle.Mount;
+// ============================================================================
+// MODULE: Vehicle.Mount
+// DESCRIPTION: ECS Structure-of-Arrays (SoA) SIMD Vehicle Mount Physics Core
+// ============================================================================
 
-struct Mount {
-    rider_id: u64,
-    top_speed: f32,
-    current_speed: f32,
-    position: vec3
+#![feature(portable_simd)] // Unlocks native hardware SIMD vector extension instruction sets
+
+use std::simd::f32x4;
+
+/// High-density packed vehicle mechanics block tracking 4 mounts concurrently.
+/// Cache-aligned to 64 bytes to eliminate false-sharing and memory-bus cross-talk.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, align(64))]
+pub struct VehicleMountSoA4 {
+    pub pos_x: [f32; 4],
+    pub pos_y: [f32; 4],
+    pub pos_z: [f32; 4],
+    
+    pub current_speed: [f32; 4],
+    pub top_speed:     [f32; 4],
+    pub rider_id_low:  [u32; 4], // Decoupled ID arrays matching SIMD hardware lane geometry lengths
 }
 
-public fn update_mount_physics(mut mount: Mount, accel_input: f32, dt: f32) {
-    mount.current_speed = math_clamp(mount.current_speed + accel_input * 10.0 * dt, 0.0, mount.top_speed);
-    mount.position.z += mount.current_speed * dt;
+pub struct UltimateVehicleMountEngine {
+    pub input_acceleration_multiplier: f32, // Input acceleration scaling factor (e.g., 10.0)
+}
+
+impl UltimateVehicleMountEngine {
+    /// PARALLEL VEHICLE PHYSICAL SOLVER OVERRIDE (Calculates 4 mounts simultaneously)
+    /// Completely branchless. Evaluates acceleration velocity bounds inside hardware SIMD registers.
+    #[inline(always)]
+    pub fn step_mount_physics_blockx4(&self, active_chunk: &mut VehicleMountSoA4, acceleration_input_lane_signals: [f32; 4], dt: f32) {
+        let dt_vec = f32x4::splat(dt);
+        let safe_zero = f32x4::splat(0.0);
+
+        // 1. Load active data tracks directly into 128-bit hardware vector registers
+        let mut p_z = f32x4::from_slice(&active_chunk.pos_z);
+        let mut speed = f32x4::from_slice(&active_chunk.current_speed);
+        
+        let limit_v = f32x4::from_slice(&active_chunk.top_speed);
+        let input_accel = f32x4::from_slice(&acceleration_input_lane_signals);
+
+        // 2. BRANCHLESS KINETIC INTEGRATION
+        // Speed = clamp(Speed + Input * Multiplier * dt, 0.0, Top_Speed)
+        let delta_velocity = input_accel * f32x4::splat(self.input_acceleration_multiplier) * dt_vec;
+        let proposed_speed = speed + delta_velocity;
+        
+        // Execute simultaneous high/low boundary clamping branchlessly inside VPU lanes
+        speed = proposed_speed.simd_clamp(safe_zero, limit_v);
+
+        // 3. ATOMIC POSITIONAL TRANSLATION STEP: Position_Z += Speed * dt
+        p_z += speed * dt_vec;
+
+        // 4. Flush calculated vector metrics directly back into the contiguous array slots
+        speed.copy_to_slice(&mut active_chunk.current_speed);
+        p_z.copy_to_slice(&mut active_chunk.pos_z);
+    }
 }
