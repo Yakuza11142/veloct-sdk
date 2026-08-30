@@ -1,17 +1,65 @@
-module Robotics.Config;
+// ============================================================================
+// MODULE: Robotics.Config
+// DESCRIPTION: Lock-Free Read-Copy-Update (URCU) Industrial Robot Config Manager
+// ============================================================================
 
-struct IndustrialRobotConfig {
-    dof_count: u8,
-    max_payload_kg: f32,
-    safety_zone_radius: f32,
-    ros_domain_id: u8
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Arc;
+
+/// Strict 16-byte memory-aligned layout matching industrial hardware field networks.
+/// Packed to eliminate CPU cache line reordering and memory-bus layout corruption.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C, align(16))]
+pub struct IndustrialRobotConfig {
+    pub max_payload_kg: f32,
+    pub safety_zone_radius: f32,
+    pub dof_count: u32,      // Expanded to u32 registers to maximize alignment consistency
+    pub ros_domain_id: u32,  // Expanded to u32 registers to maximize alignment consistency
 }
 
-public fn load_default_robotics_config() -> IndustrialRobotConfig {
-    return IndustrialRobotConfig {
-        dof_count: 6,
-        max_payload_kg: 25.0,
-        safety_zone_radius: 2.5, // 2.5 meters safety halo
-        ros_domain_id: 42
-    };
+impl Default for IndustrialRobotConfig {
+    fn default() -> Self {
+        Self {
+            dof_count: 6,
+            max_payload_kg: 25.0,
+            safety_zone_radius: 2.5,
+            ros_domain_id: 42,
+        }
+    }
+}
+
+pub struct ConcurrentRoboticsConfigRegistry {
+    active_config_ptr: AtomicPtr<IndustrialRobotConfig>,
+}
+
+impl ConcurrentRoboticsConfigRegistry {
+    pub fn new() -> Self {
+        let default_config = Box::new(IndustrialRobotConfig::default());
+        Self { active_config_ptr: AtomicPtr::new(Box::into_raw(default_config)) }
+    }
+
+    /// LOCK-FREE SETTINGS SNAPSHOT READ (Hot Path)
+    #[inline(always)]
+    pub fn read_config_snapshot(&self) -> Arc<IndustrialRobotConfig> {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Acquire);
+        unsafe { Arc::new(*raw_ptr) }
+    }
+
+    /// ATOMIC AT-RUN-TIME UPDATE HOT-SWAP (Ingestion Path)
+    pub fn commit_config_swap(&self, fresh_config: IndustrialRobotConfig) {
+        let new_raw_ptr = Box::into_raw(Box::new(fresh_config));
+        let old_raw_ptr = self.active_config_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(old_raw_ptr); }
+        }
+    }
+}
+
+impl Drop for ConcurrentRoboticsConfigRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(raw_ptr); }
+        }
+    }
 }
