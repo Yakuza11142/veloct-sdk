@@ -1,34 +1,63 @@
-module Commerce.Retail;
+// ============================================================================
+// MODULE: Commerce.Retail
+// DESCRIPTION: GPU-Accelerated Volumetric Retail Heatmap Density Parser
+// ============================================================================
 
-struct CustomerDwellZone {
-    zone_id: u16,
-    dwell_time_seconds: f32,
-    gaze_target: vec3
-}
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics APIs
+struct RetailHeatmapParameters {
+    uint2 display_resolution;      // Heatmap matrix grid size in pixels (e.g., 32x32)
+    uint  total_customer_count;    // Maximum tracking loops ceiling across traffic array (e.g., 128)
+    float proximity_cutoff_radius; // Influence radius threshold limits (e.g., 0.1)
+};
 
-public system RetailAnalyticsEngine {
-    // Tracks shelf interaction duration and dwell intensity
-    public fn process_dwell_interaction(mut zone: mut CustomerDwellZone, is_looking_at_shelf: bool, dt: f32) {
-        if is_looking_at_shelf {
-            zone.dwell_time_seconds += dt;
-        }
+// ============================================================================
+// RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+StructuredBuffer<float2>   CustomerPositionMatrix : register(t0); // Active floor traffic count snapshots
+RWStructuredBuffer<float>  OutputHeatmapBuffer    : register(u0); // Target density heatmap buffer matrix
+
+// ============================================================================
+// THE PEAK COMPUTE KERNEL: BRANCHLESS TRAFFIC DENSITY ESTIMATOR
+// ============================================================================
+
+[numthreads(32, 32, 1)] // Optimized 2D Grid block configuration mapping out 1024 cells perfectly
+void ComputeRetailTrafficHeatmapKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<RetailHeatmapParameters> config : register(b0)
+) {
+    uint2 cell_coords = dispatch_id.xy;
+    
+    // Safety boundary constraints: prevent unaligned edge memory execution crashes
+    if (cell_coords.x >= config.display_resolution.x || cell_coords.y >= config.display_resolution.y) {
+        return;
     }
 
-    // Converts floor traffic counts into density heatmap intensity
-    [GPUCompute]
-    public kernel fn generate_traffic_heatmap(position_matrix: [vec2; 128], mut heatmap_buffer: [f32; 1024]) {
-        let idx = dispatch_thread_id_x();
-        let cell_uv = vec2((idx % 32) as f32 / 32.0, (idx / 32) as f32 / 32.0);
-        
-        let mut intensity: f32 = 0.0;
-        let mut i: u64 = 0;
-        while i < 128 {
-            let dist = vec2_distance(cell_uv, position_matrix[i]);
-            if dist < 0.1 {
-                intensity += (0.1 - dist) * 10.0;
-            }
-            i += 1;
-        }
-        heatmap_buffer[idx] = math_min(intensity, 1.0);
+    uint cell_flat_idx = cell_coords.x + (cell_coords.y * config.display_resolution.x);
+
+    // Normalize cell coordinates into a uniform UV layout matrix [0.0 - 1.0]
+    float2 cell_uv = (float2)cell_coords / (float2)config.display_resolution;
+    
+    float accumulated_intensity = 0.0;
+    const float safe_epsilon = 0.0001;
+
+    // Step 1: Loop through every active consumer trajectory node branchlessly
+    for (uint i = 0; i < config.total_customer_count; i++) {
+        float2 customer_pos = CustomerPositionMatrix[i];
+
+        // Solve spatial distance: Distance = length(Customer - Cell)
+        float2 delta = cell_uv - customer_pos;
+        float current_distance = length(delta);
+
+        // step(a, b) returns 1.0 if b >= a, and 0.0 if b < a.
+        // Yields 1.0 if the customer sits inside our spatial tracking proximity circle, 0.0 if safe
+        float is_inside_proximity = step(current_distance, config.proximity_cutoff_radius);
+
+        // Compute linear density contribution weights branchlessly
+        float falloff_density = (config.proximity_cutoff_radius - current_distance) * 10.0;
+        accumulated_intensity += max(0.0, falloff_density) * is_inside_proximity;
     }
+
+    // Step 2: Flush calculations straight back to output VRAM storage buffers branchlessly
+    OutputHeatmapBuffer[cell_flat_idx] = min(accumulated_intensity, 1.0);
 }
