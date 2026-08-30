@@ -1,9 +1,57 @@
-module ICVFX.AntiMoire;
+// ============================================================================
+// MODULE: ICVFX.AntiMoire
+// DESCRIPTION: High-Throughput Branchless Convolution Anti-Moire Compute Shader
+// ============================================================================
 
-[GPUCompute]
-public kernel fn apply_moire_blur(mut target_buffer: [vec4], width: u32) {
-    let idx = dispatch_thread_id_x();
-    let left = target_buffer[math_max(0, idx - 1)];
-    let right = target_buffer[idx + 1];
-    target_buffer[idx] = (left + target_buffer[idx] * 2.0 + right) * 0.25;
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics APIs (DX12 / Vulkan)
+struct AntiMoireParameters {
+    uint2 display_resolution;  // Screen dimensions in pixels (e.g., 3840, 2160)
+    float blur_intensity;      // Convolution contribution blend scalar (e.g., 2.0)
+    float padding;             // Explicit alignment padding slot
+};
+
+// ============================================================================
+// RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+StructuredBuffer<float4>   SourcePixelFrame : register(t0); // Current frame layout streaming from nDisplay
+RWStructuredBuffer<float4> OutputWarpedFrame : register(u0); // Target filtered LED display output buffer
+
+// ============================================================================
+// THE PEAK COMPUTE KERNEL: BRANCHLESS BOUNDARY-CLAMPED CONVOLUTION FILTER
+// ============================================================================
+
+[numthreads(256, 1, 1)]
+void ComputeAntiMoireKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<AntiMoireParameters> config : register(b0)
+) {
+    uint pixel_idx = dispatch_id.x;
+    uint total_pixels = config.display_resolution.x * config.display_resolution.y;
+    
+    // Safety boundary constraints: prevent unaligned memory execution crashes
+    if (pixel_idx >= total_pixels) {
+        return;
+    }
+
+    // Step 1: Extract the active core pixel color data vector
+    float4 center_color = SourcePixelFrame[pixel_idx];
+
+    // Step 2: Resolve neighbor index targets branchlessly to prevent out-of-bounds page faults
+    // max(0, idx - 1) forces a clamp to the left boundary edge
+    uint left_idx  = max(0, (int)pixel_idx - 1);
+    // min(ceiling, idx + 1) forces a clamp to the right boundary edge
+    uint right_idx = min(total_pixels - 1, pixel_idx + 1);
+
+    // Step 3: Fetch neighbor parameters over unified cache tracks
+    float4 left_color  = SourcePixelFrame[left_idx];
+    float4 right_color = SourcePixelFrame[right_idx];
+
+    // Step 4: Execute a hardware-vectorized separable horizontal blur convolution pass
+    // Weighted formula: Combined = (Left + Center * Intensity + Right) / (2.0 + Intensity)
+    float4 accumulated_blur = left_color + (center_color * config.blur_intensity) + right_color;
+    float4 final_filtered_color = accumulated_blur / (2.0 + config.blur_intensity);
+
+    // Commit final multi-channel frame data back to display buffers branchlessly
+    OutputWarpedFrame[pixel_idx] = final_filtered_color;
 }
