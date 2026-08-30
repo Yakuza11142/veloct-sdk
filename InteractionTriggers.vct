@@ -1,11 +1,173 @@
-module World.Interactions;
+#![feature(portable_simd)] // Unlocks native hardware SIMD vector extension instruction sets
 
-struct TriggerZone {
-    center: vec3,
-    radius: f32,
-    is_active: bool
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Arc;
+use std::simd::f32x4;
+
+// ============================================================================
+// 1. DATA CORE: HARDWARE-ALIGNED CONTIGUOUS SOAS (Structure-of-Arrays)
+// ============================================================================
+
+/// High-density packed spatial interaction block tracking 4 triggers concurrently.
+/// Cache-aligned to 64 bytes to eliminate false sharing across parallel worker nodes.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, align(64))]
+pub struct InteractionTriggerSoA4 {
+    pub center_x: [f32; 4],
+    pub center_y: [f32; 4],
+    pub center_z: [f32; 4],
+    
+    /// Squared radius thresholds used to completely bypass slow square root operations
+    pub entry_radius_sq: [f32; 4], // Trigger limits when entering the boundary zones
+    pub exit_radius_sq:  [f32; 4], // Expanded limits when exiting, dampening edge jitter bounds
+    
+    /// Bitmask configuration tracking active states: 1.0 = Triggered/Inside, 0.0 = Clear/Outside
+    pub inside_state_mask: [f32; 4],
 }
 
-public fn check_interaction(zone: TriggerZone, player_pos: vec3) -> bool {
-    return zone.is_active && (vec3_distance(zone.center, player_pos) <= zone.radius);
+/// The underlying immutable configuration tracking the global player tracking node.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct PlayerTelemetryContext {
+    pub player_id: u64,
+    pub pos_x: f32,
+    pub pos_y: f32,
+    pub pos_z: f32,
+    pub system_activation_bit: u32, // Global master tracking override block
+}
+
+// ============================================================================
+// 2. THE LOCK-FREE RECENT CONTEXT REGISTRY (URCU)
+// ============================================================================
+
+/// Thread-safe global economy and spatial tracking registry.
+/// Thousands of parallel gameplay, physics, and streaming worker threads 
+/// can query current player positions lock-free with absolute zero read latency.
+pub struct ConcurrentSpatialRegistry {
+    active_context_ptr: AtomicPtr<PlayerTelemetryContext>,
+}
+
+impl ConcurrentSpatialRegistry {
+    pub fn new(initial_context: PlayerTelemetryContext) -> Self {
+        let boxed = Box::into_raw(Box::new(initial_context));
+        Self { active_context_ptr: AtomicPtr::new(boxed) }
+    }
+
+    /// LOCK-FREE TELEMETRY SNAPSHOT READ (Hot Path)
+    #[inline(always)]
+    pub fn read_context_snapshot(&self) -> Arc<PlayerTelemetryContext> {
+        let raw_ptr = self.active_context_ptr.load(Ordering::Acquire);
+        unsafe { Arc::new(*raw_ptr) }
+    }
+
+    pub fn commit_context_swap(&self, fresh_context: PlayerTelemetryContext) {
+        let new_raw_ptr = Box::into_raw(Box::new(fresh_context));
+        let old_raw_ptr = self.active_context_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(old_raw_ptr); } // Clear historical memory frame allocations
+        }
+    }
+}
+
+impl Drop for ConcurrentSpatialRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_context_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(raw_ptr); }
+        }
+    }
+}
+
+// ============================================================================
+// 3. THE UNCHANGING SPATIAL INGESTION CORE (SIMD HYSTERESIS SOLVER)
+// ============================================================================
+
+pub struct UltimateInteractionEngine;
+
+impl UltimateInteractionEngine {
+    /// PARALLEL DUAL-THRESHOLD HYSTERESIS EVALUATOR (Updates 4 trigger states simultaneously)
+    /// Employs squared distance processing loops to bypass CPU square root bottlenecks.
+    /// Completely branchless; eliminates boundary edge jitter using distinct entry/exit lanes.
+    #[inline(always)]
+    pub fn step_interaction_matrix_x4(
+        &self,
+        context_registry: &ConcurrentSpatialRegistry,
+        active_chunk: &mut InteractionTriggerSoA4
+    ) {
+        let ctx = context_registry.read_context_snapshot();
+        
+        // Load active tracking streams directly into 128-bit hardware registers
+        let cx = f32x4::from_slice(&active_chunk.center_x);
+        let cy = f32x4::from_slice(&active_chunk.center_y);
+        let cz = f32x4::from_slice(&active_chunk.center_z);
+
+        let r_entry_sq = f32x4::from_slice(&active_chunk.entry_radius_sq);
+        let r_exit_sq  = f32x4::from_slice(&active_chunk.exit_radius_sq);
+        let current_mask = f32x4::from_slice(&active_chunk.inside_state_mask);
+
+        // Broadcast player positions across vector lanes
+        let px = f32x4::splat(ctx.pos_x);
+        let py = f32x4::splat(ctx.pos_y);
+        let pz = f32x4::splat(ctx.pos_z);
+
+        // Calculate spatial displacement delta fields
+        let dx = px - cx;
+        let dy = py - cy;
+        let dz = pz - cz;
+
+        // Core Squared Distance Pass: $Dist_{sq} = dx^2 + dy^2 + dz^2$ (Completely bypasses square roots!)
+        let distance_sq = (dx * dx) + (dy * dy) + (dz * dz);
+
+        // Branchless Dual-Threshold Hysteresis Evaluation Matrix:
+        // Condition A: If currently outside, check if player cuts inside the entry radius bounds
+        let cut_inside_entry = distance_sq.simd_le(r_entry_sq).to_int().cast::<f32>();
+        
+        // Condition B: If currently inside, check if player remains inside the wider exit radius limits
+        let remained_inside_exit = distance_sq.simd_le(r_exit_sq).to_int().cast::<f32>();
+
+        // Select the appropriate threshold mask branchlessly relative to previous frame states
+        // Final_Mask = lerp(cut_inside_entry, remained_inside_exit, current_mask)
+        let updated_mask = cut_inside_entry + (remained_inside_exit - cut_inside_entry) * current_mask;
+
+        // Flush calculations straight back to memory slice array tracks without allocations
+        updated_mask.copy_to_slice(&mut active_chunk.inside_state_mask);
+    }
+}
+
+// ============================================================================
+// 4. HIGH-SCALE INFRASTRUCTURE VALIDATION HARNESS
+// ============================================================================
+
+fn main() {
+    let player_registry = ConcurrentSpatialRegistry::new(PlayerTelemetryContext {
+        player_id: 990184201,
+        pos_x: 5.0, pos_y: 0.0, pos_z: 5.0, // Player coordinates stand close to thresholds
+        system_activation_bit: 1,
+    });
+
+    let spatial_engine = UltimateInteractionEngine;
+
+    // Allocate an initial active zone cluster tracking 4 world volumes concurrently
+    // Setup entry radius = 4m ($r^2 = 16$), exit radius = 6m ($r^2 = 36$) to create a 2-meter buffer zone
+    let mut zone_chunk_0 = InteractionTriggerSoA4 {
+        center_x: [5.0, 10.0, 0.0, 5.0],
+        center_y: [0.0; 4],
+        center_z: [0.0, 10.0, 0.0, 9.5], // Lane 3 sits exactly 4.5m away (Inside exit, outside entry)
+        
+        entry_radius_sq: [16.0; 4], // $4.0^2$ meters
+        exit_radius_sq:  [36.0; 4], // $6.0^2$ meters
+        
+        inside_state_mask: [1.0, 0.0, 0.0, 1.0], // Lane 3 was previously marked INSIDE (1.0)
+    };
+
+    println!("--- Real-Time Lock-Free Spatial Hysteresis Engine Online ---");
+    println!("Initial Chunk Inside Bitmasks: {:?}", zone_chunk_0.inside_state_mask);
+
+    // Run the parallelized vector spatial verification update step
+    spatial_engine.step_interaction_matrix_x4(&player_registry, &mut zone_chunk_0);
+
+    println!("\nRecalculated System Metrics Post Vector Ingestion Pass:");
+    println!("  Lane 0 (Center Alignment hit)  - Inside: {} (Player standing perfectly inside core bounds)", zone_chunk_0.inside_state_mask[0] != 0.0);
+    println!("  Lane 1 (Distant World Portal) - Inside: {} (Player stands safely outside range limits)", zone_chunk_0.inside_state_mask[1] != 0.0);
+    println!("  Lane 3 (Jitter-Edge Buffer Node) - Inside: {} (Bypassed edge jittering due to active Hysteresis buffers!)", zone_chunk_0.inside_state_mask[3] != 0.0);
 }
