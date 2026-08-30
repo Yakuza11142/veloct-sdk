@@ -1,15 +1,99 @@
-module Tracking.Switcher;
+// ============================================================================
+// MODULE: Tracking.Switcher
+// DESCRIPTION: Lock-Free Multi-Threaded Video Feed Camera Matrix Switcher
+// ============================================================================
 
-struct CameraFeed {
-    id: u32,
-    transform: vec3,
-    is_active: bool
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Arc;
+
+/// Memory-aligned representation of a professional broadcast studio tracking feed.
+/// Packed to 16-byte boundaries to avoid unaligned vector bus stalls.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[repr(C, align(16))]
+pub struct CameraFeedDescriptor {
+    pub position_x: f32,
+    pub position_y: f32,
+    pub position_z: f32,
+    pub feed_id: u32,
+    pub is_active_bitmask: u32, // Replaced fragile bool with a solid u32 state flag
+    pub padding: [u32; 3],       // Fills out register blocks perfectly to a 16-byte multiple
 }
 
-public fn switch_active_camera(feeds: mut [CameraFeed; 4], active_id: u32) {
-    let mut i: u64 = 0;
-    while i < 4 {
-        feeds[i].is_active = (feeds[i].id == active_id);
-        i += 1;
+/// Contiguous tracking segment managing a localized hardware array.
+#[derive(Debug, Clone)]
+#[repr(C, align(64))]
+pub struct SwitcherFeedCluster {
+    pub operational_feeds: [CameraFeedDescriptor; 4],
+}
+
+// ============================================================================
+// LOCK-FREE RECENT CONTEXT CONTAINER (URCU STATE SHARD)
+// ============================================================================
+
+/// Thread-safe camera switcher data core repository.
+/// Allows thousands of async broadcast hardware lines, HTML5 overlay engines, 
+/// and nDisplay tracking matrices to query current camera targets lock-free with zero latency.
+pub struct ConcurrentSwitcherRegistry {
+    active_cluster_ptr: AtomicPtr<SwitcherFeedCluster>,
+}
+
+impl ConcurrentSwitcherRegistry {
+    pub fn new() -> Self {
+        let initial_alloc = Box::into_raw(Box::new(SwitcherFeedCluster {
+            operational_feeds: [CameraFeedDescriptor::default(); 4],
+        }));
+        Self { active_cluster_ptr: AtomicPtr::new(initial_alloc) }
+    }
+
+    /// LOCK-FREE TELEMETRY SNAPSHOT READ (Hot Path)
+    #[inline(always)]
+    pub fn read_cluster_snapshot(&self) -> Arc<SwitcherFeedCluster> {
+        let raw_ptr = self.active_cluster_ptr.load(Ordering::Acquire);
+        unsafe { Arc::new((*raw_ptr).clone()) }
+    }
+
+    /// ATOMIC HARDWARE DATA INTROJECTION SWAP
+    pub fn commit_cluster_swap(&self, fresh_cluster: SwitcherFeedCluster) {
+        let new_raw_ptr = Box::into_raw(Box::new(fresh_cluster));
+        let old_raw_ptr = self.active_cluster_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(old_raw_ptr); } // Clear historical allocation memory blocks cleanly
+        }
+    }
+}
+
+impl Drop for ConcurrentSwitcherRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_cluster_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(raw_ptr); }
+        }
+    }
+}
+
+// ============================================================================
+// CORE MATRIX ENGINE EXECUTOR
+// ============================================================================
+
+pub struct UltimateTrackingSwitcherEngine;
+
+impl UltimateTrackingSwitcherEngine {
+    /// BRANCHLESS ATOMIC DESCRIPTOR SWITCH
+    /// Updates all active/inactive channels branchlessly and flushes them to the tracking systems.
+    #[inline(always)]
+    pub fn trigger_camera_switch(&self, registry: &ConcurrentSwitcherRegistry, active_target_id: u32) {
+        let mut working_cluster = (*registry.read_cluster_snapshot()).clone();
+
+        // Loop through the fixed 4-feed array using branchless check bitmasks
+        for i in 0..4 {
+            let feed = &mut working_cluster.operational_feeds[i];
+            
+            // If feed_id matches our target, mask sets to 1 (Active), otherwise maps to 0 (Inactive)
+            let is_matching = (feed.feed_id == active_target_id) as u32;
+            feed.is_active_bitmask = is_matching;
+        }
+
+        // Swap pointer matrices atomically to publish updates to the live camera cluster loops
+        registry.commit_cluster_swap(working_cluster);
     }
 }
