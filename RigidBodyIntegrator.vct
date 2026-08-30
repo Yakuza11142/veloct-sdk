@@ -1,19 +1,73 @@
-module Physics.RigidBody;
+// ============================================================================
+// MODULE: Physics.RigidBody
+// DESCRIPTION: ECS Structure-of-Arrays (SoA) SIMD Kinematics Rigid Body Integrator
+// ============================================================================
 
-struct RigidBody {
-    position: vec3,
-    velocity: vec3,
-    acceleration: vec3,
-    mass: f32
+#![feature(portable_simd)] // Unlocks native hardware SIMD vector extension instruction sets
+
+use std::simd::f32x4;
+
+/// High-density packed rigid body kinematics block tracking 4 bodies concurrently.
+/// Cache-aligned to 64 bytes to eliminate false sharing and memory-bus cross-talk.
+#[derive(Debug, Clone)]
+#[repr(C, align(64))]
+pub struct RigidBodyComponentSoA4 {
+    pub pos_x: [f32; 4], pub pos_y: [f32; 4], pub pos_z: [f32; 4],
+    pub vel_x: [f32; 4], pub vel_y: [f32; 4], pub vel_z: [f32; 4],
+    pub accel_x: [f32; 4], pub accel_y: [f32; 4], pub accel_z: [f32; 4],
+    pub mass: [f32; 4],
 }
 
-public system PhysicsIntegrator {
-    query: (mut RigidBody),
-    override fn update(dt: f32, pipeline: mut Pipeline) {
-        pipeline.parallel_for(query, fn(mut body) {
-            body.velocity += body.acceleration * dt;
-            body.position += body.velocity * dt;
-            body.acceleration = vec3(0.0, -9.81, 0.0);
-        });
+pub struct UltimatePhysicsIntegratorSystem {
+    pub gravity_force_y: f32, // Default environment base floor acceleration (-9.81 m/s²)
+}
+
+impl UltimatePhysicsIntegratorSystem {
+    /// PARALLEL WORKER INTERACTION UPDATE (Calculates 4 structural entities simultaneously)
+    /// Completely branchless. Executes vector position transforms inside VPU lanes.
+    #[inline(always)]
+    pub fn step_rigidbody_blockx4(&self, active_chunk: &mut RigidBodyComponentSoA4, dt: f32) {
+        let dt_vec = f32x4::splat(dt);
+
+        // 1. Load active data tracks directly into 128-bit hardware vector registers
+        let mut px = f32x4::from_slice(&active_chunk.pos_x);
+        let mut py = f32x4::from_slice(&active_chunk.pos_y);
+        let mut pz = f32x4::from_slice(&active_chunk.pos_z);
+
+        let mut vx = f32x4::from_slice(&active_chunk.vel_x);
+        let mut vy = f32x4::from_slice(&active_chunk.vel_y);
+        let mut vz = f32x4::from_slice(&active_chunk.vel_z);
+
+        let mut ax = f32x4::from_slice(&active_chunk.accel_x);
+        let mut ay = f32x4::from_slice(&active_chunk.accel_y);
+        let mut az = f32x4::from_slice(&active_chunk.accel_z);
+
+        // 2. KINETIC ACCELERATION INTEGRATION: Velocity += Acceleration * dt
+        vx += ax * dt_vec;
+        vy += ay * dt_vec;
+        vz += az * dt_vec;
+
+        // 3. ATOMIC POSITIONAL TRANSLATION STEP: Position += Velocity * dt
+        px += vx * dt_vec;
+        py += vy * dt_vec;
+        pz += vz * dt_vec;
+
+        // 4. RESET FIELD ACCELERATIONS: Reset baseline vectors branchlessly to environment gravity
+        ax = f32x4::splat(0.0);
+        ay = f32x4::splat(self.gravity_force_y);
+        az = f32x4::splat(0.0);
+
+        // 5. Flush calculated vector metrics directly back into the contiguous array slots
+        px.copy_to_slice(&mut active_chunk.pos_x);
+        py.copy_to_slice(&mut active_chunk.pos_y);
+        pz.copy_to_slice(&mut active_chunk.pos_z);
+
+        vx.copy_to_slice(&mut active_chunk.vel_x);
+        vy.copy_to_slice(&mut active_chunk.vel_y);
+        vz.copy_to_slice(&mut active_chunk.vel_z);
+
+        ax.copy_to_slice(&mut active_chunk.accel_x);
+        ay.copy_to_slice(&mut active_chunk.accel_y);
+        az.copy_to_slice(&mut active_chunk.accel_z);
     }
 }
