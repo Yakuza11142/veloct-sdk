@@ -1,13 +1,64 @@
-module UI.Settings;
+// ============================================================================
+// MODULE: UI.Settings
+// DESCRIPTION: Lock-Free Read-Copy-Update (URCU) System Settings Registry
+// ============================================================================
 
-struct GameSettings {
-    master_volume: f32,
-    fov: f32,
-    vsync: bool
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Arc;
+
+/// Strict 16-byte memory-aligned layout matching engine configurations cache rows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C, align(16))]
+pub struct GameSettings {
+    pub master_volume: f32,
+    pub fov:           f32,
+    pub vsync_enabled_bitmask: u32, // Replaced primitive bool with u32 state flags
+    pub padding: [u32; 1],          // Fills out register blocks perfectly to a 16-byte multiple
 }
 
-public fn apply_defaults(mut config: GameSettings) {
-    config.master_volume = 0.8;
-    config.fov = 90.0;
-    config.vsync = true;
+impl Default for GameSettings {
+    fn default() -> Self {
+        Self {
+            master_volume: 0.8,
+            fov: 90.0,
+            vsync_enabled_bitmask: 1,
+            padding: [0; 1],
+        }
+    }
+}
+
+pub struct ConcurrentSettingsRegistry {
+    active_config_ptr: AtomicPtr<GameSettings>,
+}
+
+impl ConcurrentSettingsRegistry {
+    pub fn new() -> Self {
+        let default_config = Box::new(GameSettings::default());
+        Self { active_config_ptr: AtomicPtr::new(Box::into_raw(default_config)) }
+    }
+
+    /// LOCK-FREE SETTINGS SNAPSHOT READ (Hot Path)
+    #[inline(always)]
+    pub fn read_settings_snapshot(&self) -> Arc<GameSettings> {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Acquire);
+        unsafe { Arc::new(*raw_ptr) }
+    }
+
+    /// ATOMIC AT-RUN-TIME UPDATE HOT-SWAP (Ingestion Path)
+    pub fn commit_settings_swap(&self, fresh_config: GameSettings) {
+        let new_raw_ptr = Box::into_raw(Box::new(fresh_config));
+        let old_raw_ptr = self.active_config_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(old_raw_ptr); } // Clear out historical allocation memory blocks cleanly
+        }
+    }
+}
+
+impl Drop for ConcurrentSettingsRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_config_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(raw_ptr); }
+        }
+    }
 }
