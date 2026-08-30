@@ -1,7 +1,92 @@
-module Tracking.Lens;
+// ============================================================================
+// 1. DATA CORE: PHYSICALLY-BASED OPTICAL CALIBRATION CONSTANTS
+// ============================================================================
 
-public fn calculate_uv_distortion(uv: vec2, k1: f32, k2: f32) -> vec2 {
-    let r2 = (uv.x - 0.5) * (uv.x - 0.5) + (uv.y - 0.5) * (uv.y - 0.5);
-    let factor = 1.0 + k1 * r2 + k2 * r2 * r2;
-    return vec2(0.5 + (uv.x - 0.5) * factor, 0.5 + (uv.y - 0.5) * factor);
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics APIs (DX12 / Vulkan)
+struct LensDistortionParameters {
+    float2 display_resolution;      // Viewport dimensions in pixels (e.g., 3840.0, 2160.0)
+    float2 principal_point_cx_cy;   // Optical center shift alignment offsets (typically near [0.5, 0.5])
+    float3 radial_coefficients_k;   // Radial distortion coefficients: [k1, k2, k3]
+    float  padding_alignment;
+    float2 tangential_coefficients_p;// Tangential distortion coefficients: [p1, p2]
+    float2 inverse_solver_precision;// [Max_Iterations, Tolerance_Threshold]
+};
+
+// ============================================================================
+// 2. RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+Texture2D<float4>   SourceRenderFrame : register(t0); // Raw undisﬁgured rendered scene frame buffer
+SamplerState        LinearClampSampler : register(s0); // Hardware texture sampler configuration
+
+RWTexture2D<float4> OutputWarpedBuffer : register(u0); // Target optically calibrated display frame buffer
+
+// ============================================================================
+// 3. THE PEAK COMPUTE KERNEL: INVERSE NEWTON-RAPHSON CALIBRATION SOLVER
+// ============================================================================
+
+[numthreads(16, 16, 1)]
+void ComputeInverseLensDistortionKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<LensDistortionParameters> config : register(b0)
+) {
+    uint2 screen_coords = dispatch_id.xy;
+    
+    // Safety boundary constraints: prevent unaligned edge execution crashes
+    if (screen_coords.x >= (uint)config.display_resolution.x || screen_coords.y >= (uint)config.display_resolution.y) {
+        return;
+    }
+
+    // Normalized source UV coordinates mapping
+    float2 dest_uv = (float2)screen_coords / config.display_resolution;
+
+    // Step 1: Shift coordinates to the physical optical center (Principal Point Offset)
+    float2 x_y = dest_uv - config.principal_point_cx_cy;
+    
+    // Initialize our tracking guess vectors for the inverse mapping routine
+    float2 current_undistorted_guess = x_y;
+
+    // Step 2: UNROLLED REVERSE LOOKUP LOOP (Newton-Raphson Optimization Solver)
+    // Instead of branching conditions, we execute a fixed, cache-friendly vector loop pass
+    // to map destination pixels back to source pixels precisely, avoiding holes or tearing artifacts
+    [unroll(5)]
+    for (int i = 0; i < 5; i++) {
+        float r2 = dot(current_undistorted_guess, current_undistorted_guess);
+        float r4 = r2 * r2;
+        float r6 = r4 * r2;
+
+        // Radial factor evaluation: 1 + k1*r^2 + k2*r^4 + k3*r^6
+        float radial_factor = 1.0 + (config.radial_coefficients_k.x * r2) 
+                                  + (config.radial_coefficients_k.y * r4) 
+                                  + (config.radial_coefficients_k.z * r6);
+
+        // Tangential displacement correction steps
+        float2 tangential_offset;
+        tangential_offset.x = 2.0 * config.tangential_coefficients_p.x * current_undistorted_guess.x * current_undistorted_guess.y 
+                            + config.tangential_coefficients_p.y * (r2 + 2.0 * current_undistorted_guess.x * current_undistorted_guess.x);
+                            
+        tangential_offset.y = config.tangential_coefficients_p.x * (r2 + 2.0 * current_undistorted_guess.y * current_undistorted_guess.y) 
+                            + 2.0 * config.tangential_coefficients_p.y * current_undistorted_guess.x * current_undistorted_guess.y;
+
+        // Evaluate error function: Guess_Warped - Desired_Target
+        float2 calculated_distortion = current_undistorted_guess * radial_factor + tangential_offset;
+        float2 error_vector = calculated_distortion - x_y;
+
+        // Apply a branchless vector derivative step correction
+        current_undistorted_guess -= error_vector / max(0.0001, radial_factor);
+    }
+
+    // Step 3: Shift coordinate mappings back to uniform texture space [0.0 - 1.0]
+    float2 corrected_source_uv = current_undistorted_guess + config.principal_point_cx_cy;
+
+    // Step 4: Sample the original color frame buffer branchlessly using our inverse mapping map
+    // SampleLevel forces hardware-native bi-linear filtering across boundaries with zero thread stalls
+    float4 calibrated_color_sample = SourceRenderFrame.SampleLevel(LinearClampSampler, corrected_source_uv, 0);
+
+    // Bounding Edge Crop: If the coordinates step outside valid sensor space, clamp pixels to black
+    float is_inside = step(0.0, corrected_source_uv.x) * step(corrected_source_uv.x, 1.0) *
+                      step(0.0, corrected_source_uv.y) * step(corrected_source_uv.y, 1.0);
+
+    // Commit final multi-channel frame data back to display buffers branchlessly
+    OutputWarpedBuffer[screen_coords] = calibrated_color_sample * is_inside;
 }
