@@ -1,17 +1,47 @@
-module VFX.Particles;
+// ============================================================================
+// MODULE: AI.Perception
+// DESCRIPTION: SIMD-Accelerated Branchless Field-of-View (FOV) Detection Engine
+// ============================================================================
 
-struct Particle {
-    position: vec3,
-    velocity: vec3,
-    life: f32
-}
+#![feature(portable_simd)]
 
-public system ParticleSystem {
-    query: (mut Particle),
-    override fn update(dt: f32, pipeline: mut Pipeline) {
-        pipeline.parallel_for(query, fn(mut p) {
-            p.position += p.velocity * dt;
-            p.life -= dt;
-        });
+use std::simd::f32x4;
+
+pub struct UltimateAiPerceptionEngine;
+
+impl UltimateAiPerceptionEngine {
+    /// PARALLEL FIELDS-OF-VIEW DETECTOR
+    /// Determines target containment metrics branchlessly inside vector lanes.
+    /// Completely immune to coordinate alignment singularities or yaw flips.
+    #[inline(always)]
+    pub fn detect_target_contained(
+        &self,
+        npc_pos: [f32; 3],
+        npc_forward: [f32; 3],
+        target_pos: [f32; 3],
+        fov_deg: f32,
+    ) -> bool {
+        // Load data frames into hardware registers
+        let pos_npc = f32x4::from_array([npc_pos[0], npc_pos[1], npc_pos[2], 0.0]);
+        let fwd_npc = f32x4::from_array([npc_forward[0], npc_forward[1], npc_forward[2], 0.0]);
+        let pos_tgt = f32x4::from_array([target_pos[0], target_pos[1], target_pos[2], 0.0]);
+
+        // Calculate spatial displacement direction vectors: dir = normalize(target - npc)
+        let delta_target = pos_tgt - pos_npc;
+        let dist_target = (delta_target * delta_target).reduce_sum().max(0.0001).sqrt();
+        let target_direction = delta_target / f32x4::splat(dist_target);
+
+        // Normalize forward orientation coordinates vector
+        let fwd_len = (fwd_npc * fwd_npc).reduce_sum().max(0.0001).sqrt();
+        let target_forward = fwd_npc / f32x4::splat(fwd_len);
+
+        // Vector Dot Product multiplication pass: Dot = reduce_sum(Forward * Direction)
+        let dot_product = (target_forward * target_direction).reduce_sum();
+
+        // Branchless Cosine Evaluation: Is dot >= cos(fov_rad)?
+        let fov_rad = fov_deg * 0.0174532925;
+        let threshold_cos = fov_rad.cos();
+
+        dot_product >= threshold_cos
     }
 }
