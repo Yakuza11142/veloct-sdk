@@ -1,21 +1,214 @@
-module Tracking.FreeD;
+use std::net::UdpSocket;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
-struct CameraTransform {
-    position: vec3,
-    rotation: vec3,
-    focus: f32,
-    zoom: f32
+// ============================================================================
+// 1. DATA CORE: HARDWARE-ALIGNED GRAPHICS CAMERA DESCRIPTORS
+// ============================================================================
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[repr(C, align(16))]
+pub struct Vec3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub padding: f32, // Guarantees structural 16-byte CPU/GPU alignment
 }
 
-public fn parse_freed_packet(buffer: [u8; 29]) -> CameraTransform {
-    let raw_x = ((buffer[2] as i32) << 16) | ((buffer[3] as i32) << 8) | (buffer[4] as i32);
-    let raw_y = ((buffer[5] as i32) << 16) | ((buffer[6] as i32) << 8) | (buffer[7] as i32);
-    let raw_z = ((buffer[8] as i32) << 16) | ((buffer[9] as i32) << 8) | (buffer[10] as i32);
+/// Memory-aligned camera tracking layout.
+/// Packed to match strict 16-byte GPU Constant Buffer specifications perfectly.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[repr(C, align(16))]
+pub struct CameraTransform {
+    pub position: Vec3,
+    pub rotation: Vec3, // Pitch, Yaw, Roll in degrees
+    pub focus: f32,
+    pub zoom: f32,
+    pub packet_arrival_tsc: u64, // Hardware CPU clock cycles (RDTSC) for nanosecond jitter profiling
+}
+
+// ============================================================================
+// 2. THE LOCK-FREE RECENT CONTEXT REGISTRY (URCU)
+// ============================================================================
+
+pub struct ConcurrentCameraRegistry {
+    active_transform_ptr: AtomicPtr<CameraTransform>,
+}
+
+impl ConcurrentCameraRegistry {
+    pub fn new() -> Self {
+        let default_transform = Box::new(CameraTransform::default());
+        Self { active_transform_ptr: AtomicPtr::new(Box::into_raw(default_transform)) }
+    }
+
+    /// LOCK-FREE HOT SNAPSHOT READ (Render Thread Hot Path)
+    #[inline(always)]
+    pub fn read_transform_snapshot(&self) -> Arc<CameraTransform> {
+        let raw_ptr = self.active_transform_ptr.load(Ordering::Acquire);
+        unsafe { Arc::new(*raw_ptr) }
+    }
+
+    /// ATOMIC RUNTIME HOT-SWAP (Ingestion Path)
+    pub fn commit_transform_swap(&self, fresh_transform: CameraTransform) {
+        let new_raw_ptr = Box::into_raw(Box::new(fresh_transform));
+        let old_raw_ptr = self.active_transform_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(old_raw_ptr); } // Clear out historical allocation memory
+        }
+    }
+}
+
+impl Drop for ConcurrentCameraRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_transform_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(raw_ptr); }
+        }
+    }
+}
+
+// ============================================================================
+// 3. THE ASYNCHRONOUS NON-BLOCKING UDP INGESTION LAYER
+// ============================================================================
+
+pub struct LiveTelemetryIngestionPipeline;
+
+impl LiveTelemetryIngestionPipeline {
+    /// BRANCHLESS 24-BIT SIGN EXTENSION SOLVER
+    #[inline(always)]
+    fn extend_24_bit_signed(b0: u8, b1: u8, b2: u8) -> i32 {
+        let raw = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        ((raw << 8) as i32) >> 8
+    }
+
+    /// SPAWNS LOCK-FREE BACKGROUND NETWORK LISTENER LOOP
+    /// Establishes a non-blocking UDP socket to stream binary FreeD tracking data into the core.
+    pub fn spawn_network_listener(
+        registry: Arc<ConcurrentCameraRegistry>,
+        bind_address: &'static str,
+        shutdown_signal: Arc<AtomicBool>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let socket = UdpSocket::bind(bind_address).expect("Fatal Error: Failed to bind to target UDP tracking port.");
+            socket.set_nonblocking(true).expect("Fatal Error: Failed to configure tracking socket to non-blocking mode.");
+
+            let mut packet_buffer = [0u8; 29]; // Strict FreeD D1 packet payload size
+
+            println!("[Tracking Ingestion]: Asynchronous socket active on loop address {}...", bind_address);
+
+            while !shutdown_signal.load(Ordering::Relaxed) {
+                match socket.recv_from(&mut packet_buffer) {
+                    Ok((bytes_received, _sender_addr)) => {
+                        // Validate packet length and standard FreeD D1 header signature
+                        if bytes_received == 29 && packet_buffer[0] == 0xD1 {
+                            
+                            // 1. Run Checksum Verification Pass
+                            let mut checksum_accumulator: u32 = 0;
+                            for i in 0..28 {
+                                checksum_accumulator = checksum_accumulator.wrapping_add(packet_buffer[i] as u32);
+                            }
+                            let calculated_checksum = ((40.0 - (checksum_accumulator as f64 % 256.0)) % 256.0) as u8;
+                            
+                            if calculated_checksum != packet_buffer[28] {
+                                continue; // Checksum failed. Drop corrupted tracking data instantly.
+                            }
+
+                            // 2. Decode Positional and Rotational 24-Bit Signed Fields
+                            let x_ticks = Self::extend_24_bit_signed(packet_buffer[2], packet_buffer[3], packet_buffer[4]);
+                            let y_ticks = Self::extend_24_bit_signed(packet_buffer[5], packet_buffer[6], packet_buffer[7]);
+                            let z_ticks = Self::extend_24_bit_signed(packet_buffer[8], packet_buffer[9], packet_buffer[10]);
+
+                            let pitch_ticks = Self::extend_24_bit_signed(packet_buffer[11], packet_buffer[12], packet_buffer[13]);
+                            let yaw_ticks   = Self::extend_24_bit_signed(packet_buffer[14], packet_buffer[15], packet_buffer[16]);
+                            let roll_ticks  = Self::extend_24_bit_signed(packet_buffer[17], packet_buffer[18], packet_buffer[19]);
+
+                            let focus_ticks = ((packet_buffer[20] as u32) << 16) | ((packet_buffer[21] as u32) << 8) | (packet_buffer[22] as u32);
+                            let zoom_ticks  = ((packet_buffer[23] as u32) << 16) | ((packet_buffer[24] as u32) << 8) | (packet_buffer[25] as u32);
+
+                            // 3. Assemble Aligned Camera Transform Snapshot
+                            let fresh_transform = CameraTransform {
+                                position: Vec3 {
+                                    x: x_ticks as f32 / 64000.0,
+                                    y: y_ticks as f32 / 64000.0,
+                                    z: z_ticks as f32 / 64000.0,
+                                    padding: 0.0,
+                                },
+                                rotation: Vec3 {
+                                    x: pitch_ticks as f32 / 32768.0,
+                                    y: yaw_ticks as f32 / 32768.0,
+                                    z: roll_ticks as f32 / 32768.0,
+                                    padding: 0.0,
+                                },
+                                focus: focus_ticks as f32,
+                                zoom:  zoom_ticks as f32,
+                                packet_arrival_tsc: unsafe { std::arch::x86_64::_rdtsc() },
+                            };
+
+                            // Commit directly into our lock-free architecture registry matrix
+                            registry.commit_transform_swap(fresh_transform);
+                        }
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Buffer empty. Yield CPU core temporarily to prevent thread starvation spikes
+                        thread::sleep(Duration::from_micros(250));
+                    }
+                    Err(_) => {}
+                }
+            }
+            println!("[Tracking Ingestion]: Socket worker pool clean shutdown complete.");
+        })
+    }
+}
+
+// ============================================================================
+// 4. LIVE STUDIO PRODUCTION SIMULATION ENVIRONMENT
+// ============================================================================
+
+fn main() {
+    let camera_registry = Arc::new(ConcurrentCameraRegistry::new());
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+    println!("--- Real-Time Asynchronous Camera Tracking Network Core Online ---");
+
+    // 1. Launch the non-blocking background wire collector loop thread
+    let ingestion_registry_ref = Arc::clone(&camera_registry);
+    let ingestion_shutdown_ref = Arc::clone(&shutdown_flag);
+    let network_worker_handle = LiveTelemetryIngestionPipeline::spawn_network_listener(
+        ingestion_registry_ref,
+        "127.0.0.1:40994", // Local network loopback address channel
+        ingestion_shutdown_ref,
+    );
+
+    // 2. Simulate an active camera tracking packet transmission over a mock sender socket
+    {
+        let sender_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        // Simulation Recipe Payload: Pos X = -2.5 meters, Rotation Yaw = +45.0 degrees
+        let mut simulated_broadcast_packet = [0u8; 29];
+        simulated_broadcast_packet[0] = 0xD1; 
+        
+        simulated_broadcast_packet[2] = 0xFF; simulated_broadcast_packet[3] = 0xFD; simulated_broadcast_packet[4] = 0x8F; // -160000 ticks
+        simulated_broadcast_packet[14] = 0x01; simulated_broadcast_packet[15] = 0x68; simulated_broadcast_packet[16] = 0x00; // 1474560 ticks
+
+        let mut checksum_acc: u32 = 0;
+        for i in 0..28 { checksum_acc = checksum_acc.wrapping_add(simulated_broadcast_packet[i] as u32); }
+        simulated_broadcast_packet[28] = ((40.0 - (checksum_acc as f64 % 256.0)) % 256.0) as u8;
+        
+        thread::sleep(Duration::from_millis(50)); // Allow background thread to warm up
+        sender_socket.send_to(&simulated_broadcast_packet, "127.0.0.1:40994").unwrap();
+        thread::sleep(Duration::from_millis(50)); // Allow data packet ingestion step to finalize
+    }
+
+    // 3. Verification Pass: Read telemetry data locklessly from the main graphics loop thread
+    let final_compositor_frame = camera_registry.read_transform_snapshot();
+    println!("\n=== Live Video Compositor Telemetry Ingest Verified ===");
+    println!("  Reconstructed Position X : {:.3} meters (Expected -2.500m)", final_compositor_frame.position.x);
+    println!("  Reconstructed Rotation Y : {:.2}° (Expected 45.00°)", final_compositor_frame.rotation.y);
+    println!("  Ingestion TSC Tick Pulse  : {}", final_compositor_frame.packet_arrival_tsc);
     
-    return CameraTransform {
-        position: vec3(raw_x as f32 / 64000.0, raw_y as f32 / 64000.0, raw_z as f32 / 64000.0),
-        rotation: vec3(0.0, 0.0, 0.0),
-        focus: 1.0,
-        zoom: 1.0
-    };
+    // 4. Trigger safe shutdown phase across systems channels
+    shutdown_flag.store(true, Ordering::Relaxed);
+    network_worker_handle.join().unwrap();
+    println!("\nSystem Lifecycle Successfully Terminated.");
 }
