@@ -1,7 +1,53 @@
-module ICVFX.OuterFrustum;
+// ============================================================================
+// MODULE: ICVFX.OuterFrustum
+// DESCRIPTION: GPU-Accelerated Volumetric Outer LED Wall Environment Fill Shader
+// ============================================================================
 
-[GPUCompute]
-public kernel fn fill_outer_wall(mut led_wall_buffer: [vec4], env_hdri: [vec4]) {
-    let idx = dispatch_thread_id_x();
-    led_wall_buffer[idx] = env_hdri[idx] * 0.35; // Dimmed environmental fill
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics APIs (DX12 / Vulkan)
+struct OuterFrustumParameters {
+    uint2 display_resolution;      // Total wall grid footprint layout size in pixels (e.g., 7680x4320)
+    float environmental_gain;      // Dimmed master fill scalar multiplier factor (e.g., 0.35)
+    float padding;                 // Explicit layout alignment memory padding slot
+};
+
+// ============================================================================
+// RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+Texture2D<float4>   SourceHdriTexture : register(t0); // Pre-filtered HDRI ambient lighting backdrop map
+SamplerState        LinearClampSampler : register(s0); // Hardware native texture sampler configuration
+
+RWTexture2D<float4> OutputLedWallBuffer : register(u0); // Target multi-node LED display frame buffer
+
+// ============================================================================
+// THE PEAK COMPUTE KERNEL: BRANCHLESS BOUNDARY-CLAMPED ENV DISPATCH
+// ============================================================================
+
+[numthreads(16, 16, 1)] // High-throughput parallelized execution group threads layout (256 dispatches)
+void ComputeOuterWallFillKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<OuterFrustumParameters> config : register(b0)
+) {
+    uint2 pixel_coords = dispatch_id.xy;
+    
+    // Safety boundary constraints: prevent unaligned edge execution crashes across server clusters
+    if (pixel_coords.x >= config.display_resolution.x || pixel_coords.y >= config.display_resolution.y) {
+        return;
+    }
+
+    // Step 1: Normalize target screen-pixel integer coordinates into a uniform UV grid [0.0 - 1.0]
+    float2 uv = (float2)pixel_coords / (float2)config.display_resolution;
+
+    // Step 2: Sample environmental radiance branchlessly from the source backdrop map
+    // SampleLevel bypasses internal pixel derivative loops, eliminating hardware memory fetch stalls
+    float4 env_radiance_sample = SourceHdriTexture.SampleLevel(LinearClampSampler, uv, 0);
+
+    // Step 3: Compute dimmed environmental light filling vectors component-wise
+    float3 final_dimmed_rgb = env_radiance_sample.rgb * config.environmental_gain;
+
+    // Step 4: Apply Reinhard tone-mapping profile compression to prevent highlight clipping on physical LED tiles
+    final_dimmed_rgb = final_dimmed_rgb / (final_dimmed_rgb + float3(1.0, 1.0, 1.0));
+
+    // Commit final multi-channel frame data back to display VRAM storage buffers branchlessly
+    OutputLedWallBuffer[pixel_coords] = float4(final_dimmed_rgb, env_radiance_sample.a);
 }
