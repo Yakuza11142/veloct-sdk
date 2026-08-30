@@ -1,9 +1,53 @@
-module VFX.PostProcess;
+// ============================================================================
+// MODULE: VFX.PostProcess
+// DESCRIPTION: High-Throughput Branchless Bloom Exposure Compute Shader
+// ============================================================================
 
-[GPUCompute]
-public kernel fn apply_bloom(color_in: [vec4], mut color_out: [vec4], threshold: f32) {
-    let idx = dispatch_thread_id_x();
-    let c = color_in[idx];
-    let luminance = c.r * 0.2126 + c.g * 0.7152 + c.b * 0.0722;
-    color_out[idx] = select(luminance > threshold, c * 1.5, c);
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics APIs
+struct BloomParameters {
+    uint2 display_resolution;      // Viewport dimensions in pixels (e.g., 3840x2160)
+    float luminance_threshold;     // Cut-off threshold where bloom triggers (e.g., 0.8)
+    float bloom_intensity_scale;   // Energy brightness amplification factor (e.g., 1.5)
+};
+
+// ============================================================================
+// RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+StructuredBuffer<float4>   SourceColorFrame : register(t0); // Current unﬁltered scene frame texture
+RWStructuredBuffer<float4> OutputBloomBuffer : register(u0); // Target post-processed bloom frame buffer
+
+// ============================================================================
+// THE PEAK COMPUTE KERNEL: BRANCHLESS BRIGHT-PASS INTENSITY FILTER
+// ============================================================================
+
+[numthreads(256, 1, 1)]
+void ComputeBloomBrightPassKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<BloomParameters> config : register(b0)
+) {
+    uint pixel_idx = dispatch_id.x;
+    uint total_pixels = config.display_resolution.x * config.display_resolution.y;
+    
+    // Safety boundary constraints: prevent unaligned edge execution crashes across server clusters
+    if (pixel_idx >= total_pixels) {
+        return;
+    }
+
+    // Step 1: Extract current core pixel color data vector
+    float4 pixel_color = SourceColorFrame[pixel_idx];
+
+    // Step 2: Compute accurate Rec. 709 linear luminance component-wise
+    float luminance = dot(pixel_color.rgb, float3(0.2126, 0.7152, 0.0722));
+
+    // Step 3: Branchless Selection Mask
+    // step(a, b) returns 1.0 if b >= a, and 0.0 if b < a.
+    // Yields 1.0 if luminance cuts inside the threshold, 0.0 if safe
+    float is_bright = step(config.luminance_threshold, luminance);
+    
+    // Smoothly scale up energy factors branchlessly, completely avoiding warp execution thread stalls
+    float3 bright_pass_color = lerp(pixel_color.rgb, pixel_color.rgb * config.bloom_intensity_scale, is_bright);
+
+    // Commit final multi-channel frame data back to display VRAM storage buffers branchlessly
+    OutputBloomBuffer[pixel_idx] = float4(bright_pass_color, pixel_color.a);
 }
