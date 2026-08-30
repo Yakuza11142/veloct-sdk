@@ -1,6 +1,62 @@
-module Lighting.Raytrace;
+// ============================================================================
+// MODULE: Lighting.Raytrace
+// DESCRIPTION: High-Throughput Branchless Plane Intersection Reflection Raytracer
+// ============================================================================
 
-public fn trace_prop_reflection(ray_origin: vec3, ray_dir: vec3, stage_plane: vec4) -> vec3 {
-    let t = -(math_dot(ray_origin, stage_plane.xyz) + stage_plane.w) / math_dot(ray_dir, stage_plane.xyz);
-    return ray_origin + ray_dir * t;
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics APIs (DX12 / Vulkan)
+struct RaytraceParameters {
+    float4 stage_plane_xyz_w;    // Plane normal coefficients (XYZ) and distance from origin (W)
+    float  safe_epsilon;         // Near-zero boundary constraint to eliminate division singularities
+    float3 padding;              // Strict memory alignment padding slot
+};
+
+// ============================================================================
+// RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+StructuredBuffer<float3>   SourceRayOrigins    : register(t0); // Extracted ray origin positions array
+StructuredBuffer<float3>   SourceRayDirections : register(t1); // Extracted normalized ray direction lanes
+RWStructuredBuffer<float3> OutputIntersectionBuffer : register(u0); // Target calculated world 3D vectors
+
+// ============================================================================
+// THE PEAK COMPUTE KERNEL: DETERMINISTIC PLANAR REFLECTION SOLVER
+// ============================================================================
+
+[numthreads(256, 1, 1)]
+void ComputePlanarReflectionKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<RaytraceParameters> config : register(b0)
+) {
+    uint ray_idx = dispatch_id.x;
+    
+    // Safety boundary constraints: dynamic query ceiling verification
+    uint total_rays;
+    OutputIntersectionBuffer.GetDimensions(total_rays);
+    if (ray_idx >= total_rays) {
+        return;
+    }
+
+    // Step 1: Extract current core ray properties from the pipeline streams
+    float3 ro = SourceRayOrigins[ray_idx];
+    float3 rd = SourceRayDirections[ray_idx];
+
+    float3 plane_normal = config.stage_plane_xyz_w.xyz;
+    float  plane_distance = config.stage_plane_xyz_w.w;
+
+    // Step 2: Compute planar intersection parameter ($t$) branchlessly
+    // Formula: $t = -\frac{\mathbf{R}_o \cdot \mathbf{n} + d}{\mathbf{R}_d \cdot \mathbf{n}}$
+    float denominator = dot(rd, plane_normal);
+    
+    // Prevent division-by-zero math crashes if ray travels perfectly parallel to the plane
+    float sign_denom = step(0.0, denominator) * 2.0 - 1.0;
+    float safe_denom = denominator + (step(abs(denominator), config.safe_epsilon) * config.safe_epsilon * sign_denom);
+
+    float t = -(dot(ro, plane_normal) + plane_distance) / safe_denom;
+
+    // Step 3: Solve precise 3D intersection hit location: $\mathbf{P} = \mathbf{R}_o + \mathbf{R}_d \cdot t$
+    // If $t$ evaluates negative (intersection lies behind ray origin), clamp coordinates to origin
+    float3 hit_position = ro + rd * max(0.0, t);
+
+    // Commit final calculated data blocks straight back to output VRAM storage buffers branchlessly
+    OutputIntersectionBuffer[ray_idx] = hit_position;
 }
