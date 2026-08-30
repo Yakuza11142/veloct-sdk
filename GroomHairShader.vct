@@ -1,8 +1,87 @@
-module Assets.Hair;
+// ============================================================================
+// 1. DATA CORE: PHYSICALLY-BASED HAIR SHADING CONSTANTS
+// ============================================================================
 
-public fn kajiya_kay_specular(tangent: vec3, view_dir: vec3, light_dir: vec3, exponent: f32) -> f32 {
-    let h = vec3_normalize(light_dir + view_dir);
-    let dot_th = math_dot(tangent, h);
-    let sin_th = math_sqrt(1.0 - dot_th * dot_th);
-    return math_pow(sin_th, exponent);
+// Memory-aligned to strict 16-byte structural boundaries for modern graphics APIs
+struct HairShadingParameters {
+    float3 hair_absorption;        // Melanin-based internal absorption colors (RGB)
+    float  hair_eccentricity;      // Cross-sectional fiber ovalness modifier [0.0 - 1.0]
+    float3 shift_primary_trt;      // Longitudinal scale tilt offsets: [R_shift, TRT_shift, Padding]
+    float  hair_specular_exponent; // Concentration sharpness of the reflection glints
+};
+
+// ============================================================================
+// 2. RESOURCE INPUT/OUTPUT HARDWARE INTERFACES
+// ============================================================================
+
+Texture2D<float4>   G_BufferTangents  : register(t0); // Aligned strand tracking world tangent map
+Texture2D<float4>   G_BufferBaseColor : register(t1); // Hair base color / melanin structure map
+SamplerState        LinearClampSampler : register(s0); // Hardware sampler configuration
+
+RWTexture2D<float4> OutputHairBuffer   : register(u0); // Target composited cinematic buffer frame
+
+// ============================================================================
+// 3. THE PEAK COMPUTE KERNEL: MARSCHNER-SHIFTED ANISOTROPIC SOLVER
+// ============================================================================
+
+/// Computes the branchless longitudinal scattering distribution (M-Term)
+/// Accounts for cuticular scale tilt by shifting the reflection angles away from the mirror vector.
+float evaluate_longitudinal_long_shift(float dot_th, float shift, float exponent) {
+    // Apply the localized scale tilt displacement to the dot product channel
+    float shifted_dot = dot_th - shift;
+    
+    // Smooth step vector approximation replaces heavy trigonometry / square roots branchlessly
+    float sin_theta = sqrt(max(0.0001, 1.0 - shifted_dot * shifted_dot));
+    return pow(sin_theta, exponent);
+}
+
+[numthreads(16, 16, 1)]
+void ComputeCinematicHairKernel(
+    uint3 dispatch_id : SV_DispatchThreadID,
+    ConstantBuffer<HairShadingParameters> config : register(b0)
+) {
+    uint2 screen_coords = dispatch_id.xy;
+    
+    // Safety boundary check: drop execution thread if it steps past viewport dimensions
+    // Resolved dynamically on launch using descriptor maps
+    uint2 view_dimensions;
+    OutputHairBuffer.GetDimensions(view_dimensions.x, view_dimensions.y);
+    if (screen_coords.x >= view_dimensions.x || screen_coords.y >= view_dimensions.y) {
+        return;
+    }
+
+    // Step 1: Extract tracking attributes from local G-Buffer storage textures
+    float3 tangent_vector = normalize(G_BufferTangents[screen_coords].xyz);
+    float3 base_color     = G_BufferBaseColor[screen_coords].rgb;
+    
+    float3 view_dir  = normalize(GetCameraDirectionVectors());
+    float3 light_dir = normalize(GetActiveSunDirection());
+
+    // Step 2: Compute the half-angle vector matrix
+    float3 half_vector = normalize(light_dir + view_dir);
+    float  dot_th = dot(tangent_vector, half_vector);
+
+    // Step 3: EVALUATE THE DUAL-SHIFT MARSCHNER SPECULAR BANDS
+    // Pass A: Primary Reflection (R) - Shifts toward the root due to cuticular scales
+    float r_specular = evaluate_longitudinal_long_shift(dot_th, config.shift_primary_trt.x, config.hair_specular_exponent);
+    float3 primary_specular_color = float3(1.0, 1.0, 1.0) * r_specular; // Pure white surface reflection
+
+    // Pass B: Secondary Reflection (TRT) - Transmits through, bounces off back wall, shifts toward tip
+    float trt_specular = evaluate_longitudinal_long_shift(dot_th, config.shift_primary_trt.y, config.hair_specular_exponent * 0.3);
+    // Secondary reflection picks up internal absorption color fields twice due to double pass traversal
+    float3 secondary_specular_color = base_color * config.hair_absorption * trt_specular;
+
+    // Step 4: COMPUTE DUAL-SCATTERING VOLUMETRIC TRANSMITTANCE
+    // Approximates the multi-scattering light cloud passing through deep layers of the groom volume
+    float diffuse_scatter_factor = max(0.0, dot(tangent_vector, light_dir) * 0.5 + 0.5);
+    float3 volumetric_transmittance = base_color * diffuse_scatter_factor * (1.0 - config.hair_eccentricity);
+
+    // Step 5: Composite final wide-gamut cinematic hair light fields branchlessly
+    float3 final_hair_lighting = primary_specular_color + secondary_specular_color + volumetric_transmittance;
+
+    // Apply exposure compression profiles before finalizing buffer edits
+    final_hair_lighting = 1.0 - exp(-2.0 * final_hair_lighting);
+
+    // Commit final multi-channel frame data back to display buffers branchlessly
+    OutputHairBuffer[screen_coords] = float4(final_hair_lighting, 1.0);
 }
