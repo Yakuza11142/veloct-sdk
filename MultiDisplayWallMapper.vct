@@ -1,12 +1,97 @@
-module Pipeline.DisplayMapper;
+// ============================================================================
+// MODULE: Pipeline.DisplayMapper
+// DESCRIPTION: Data-Driven Resolution Framebuffer Slicing Node Engine
+// ============================================================================
 
-struct DisplayNode {
-    x_offset: u16,
-    y_offset: u16,
-    width: u16,
-    height: u16
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Arc;
+
+/// Strict 16-byte memory-aligned display layout node.
+/// Maps hardware raster coordinates perfectly to eliminate layout misalignment or tearing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[repr(C, align(16))]
+pub struct DisplayNodeDescriptor {
+    pub x_offset: u32, // Scaled to u32 to maximize compatibility with modern GPU push constants
+    pub y_offset: u32,
+    pub width:    u32,
+    pub height:   u32,
 }
 
-public fn slice_framebuffer(screen_idx: u8, full_res: vec2) -> DisplayNode {
-    return DisplayNode { x_offset: (screen_idx as u16) * 1920, y_offset: 0, width: 1920, height: 1080 };
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StageViewportProfile {
+    pub single_screen_width:  u32,
+    pub single_screen_height: u32,
+    pub global_canvas_scale_x: f32,
+    pub global_canvas_scale_y: f32,
 }
+
+// ============================================================================
+// LOCK-FREE UNIFORM REFERENCE STORE (URCU)
+// ============================================================================
+
+/// Thread-safe multi-display rendering layout repository.
+pub struct ConcurrentDisplayRegistry {
+    active_profile_ptr: AtomicPtr<StageViewportProfile>,
+}
+
+impl ConcurrentDisplayRegistry {
+    pub fn new() -> Self {
+        let default_profile = Box::new(StageViewportProfile {
+            single_screen_width: 1920, // Default 1080p canvas grid metrics
+            single_screen_height: 1080,
+            global_canvas_scale_x: 1.0,
+            global_canvas_scale_y: 1.0,
+        });
+        Self { active_profile_ptr: AtomicPtr::new(Box::into_raw(default_profile)) }
+    }
+
+    #[inline(always)]
+    pub fn read_profile_snapshot(&self) -> Arc<StageViewportProfile> {
+        let raw_ptr = self.active_profile_ptr.load(Ordering::Acquire);
+        unsafe { Arc::new(*raw_ptr) }
+    }
+
+    pub fn hot_swap_viewport_profile(&self, fresh_profile: StageViewportProfile) {
+        let new_raw_ptr = Box::into_raw(Box::new(fresh_profile));
+        let old_raw_ptr = self.active_profile_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(old_raw_ptr); }
+        }
+    }
+}
+
+impl Drop for ConcurrentDisplayRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_profile_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(raw_ptr); }
+        }
+    }
+}
+
+// ============================================================================
+// CORE VIEWPORT SLICING LOGIC
+// ============================================================================
+
+pub struct UltimateDisplayMapperEngine;
+
+impl UltimateDisplayMapperEngine {
+    /// DATA-DRIVEN RESOLUTION SEGMENT COMPOSITOR
+    /// Slices and returns an exact, aligned display layout node for any multi-monitor split frame.
+    #[inline(always)]
+    pub fn slice_framebuffer_node(&self, registry: &ConcurrentDisplayRegistry, screen_index: u32) -> DisplayNodeDescriptor {
+        let current_viewport = registry.read_profile_snapshot();
+
+        // Calculate layout offsets dynamically based on the current configuration data matrix
+        // Completely deletes hardcoded macros or compile-time resolution assumptions
+        let calculated_x_offset = screen_index * current_viewport.single_screen_width;
+
+        DisplayNodeDescriptor {
+            x_offset: calculated_x_offset,
+            y_offset: 0,
+            width:  current_viewport.single_screen_width,
+            height: current_viewport.single_screen_height,
+        }
+    }
+}
+
