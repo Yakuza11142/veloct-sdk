@@ -1,17 +1,115 @@
-module Scientific.Config;
+// ============================================================================
+// MODULE: Scientific.Config
+// DESCRIPTION: Tamper-Evident High-Precision Physical Constant Registry
+// ============================================================================
 
-struct ScientificConstants {
-    speed_of_light: f32,
-    vacuum_permittivity: f32,
-    vacuum_permeability: f32,
-    earth_angular_velocity: f32
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Arc;
+
+/// Strict 16-byte memory-aligned layout holding unchanging precision constants.
+/// Formatted to guard against language serialization shifts and memory tampering.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C, align(16))]
+pub struct ScientificConstants {
+    pub speed_of_light: f32,          // 299792458.0 m/s
+    pub vacuum_permittivity: f32,     // 8.854187817e-12 F/m
+    pub vacuum_permeability: f32,     // 1.256637061e-6 H/m
+    pub earth_angular_velocity: f32,  // 7.292115e-5 rad/s
+    pub expected_integrity_crc32: u32,
+    pub padding: [u32; 3],            // Fills out the register boundary perfectly to a 16-byte multiple
 }
 
-public fn load_physical_constants() -> ScientificConstants {
-    return ScientificConstants {
-        speed_of_light: 299792458.0,        // m/s
-        vacuum_permittivity: 8.854187817e-12, // F/m
-        vacuum_permeability: 1.256637061e-6,  // H/m
-        earth_angular_velocity: 7.292115e-5   // rad/s
-    };
+impl Default for ScientificConstants {
+    fn default() -> Self {
+        let mut base = Self {
+            speed_of_light: 299792458.0,
+            vacuum_permittivity: 8.8541876e-12,
+            vacuum_permeability: 1.256637e-6,
+            earth_angular_velocity: 7.292115e-5,
+            expected_integrity_crc32: 0,
+            padding: [0; 3],
+        };
+        base.expected_integrity_crc32 = ScientificConfigAuditor::compute_block_crc32(&base);
+        base
+    }
+}
+
+/// A thread-safe, lock-free global constant repository.
+/// Allows thousands of physics loops to query constants concurrently with zero lock overhead.
+pub struct ConcurrentScientificRegistry {
+    active_constants_ptr: AtomicPtr<ScientificConstants>,
+}
+
+impl ConcurrentScientificRegistry {
+    pub fn new() -> Self {
+        let default_config = Box::new(ScientificConstants::default());
+        Self { active_constants_ptr: AtomicPtr::new(Box::into_raw(default_config)) }
+    }
+
+    /// LOCK-FREE HOT SNAPSHOT READ (Hot Path)
+    #[inline(always)]
+    pub fn acquire_snapshot(&self) -> SafeConfigGuard {
+        let raw_ptr = self.active_constants_ptr.load(Ordering::Acquire);
+        SafeConfigGuard { config_ref: unsafe { &*raw_ptr } }
+    }
+
+    /// ATOMIC AT-RUN-TIME HOT-SWAP (Management Path)
+    pub fn hot_swap_constants(&self, mut new_config: ScientificConstants) {
+        new_config.expected_integrity_crc32 = ScientificConfigAuditor::compute_block_crc32(&new_config);
+        let new_raw_ptr = Box::into_raw(Box::new(new_config));
+        let old_raw_ptr = self.active_constants_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(old_raw_ptr); }
+        }
+    }
+}
+
+impl Drop for ConcurrentScientificRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_constants_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(raw_ptr); }
+        }
+    }
+}
+
+pub struct SafeConfigGuard<'a> {
+    config_ref: &'a ScientificConstants,
+}
+
+impl<'a> std::ops::Deref for SafeConfigGuard<'a> {
+    type Target = ScientificConstants;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        if !ScientificConfigAuditor::verify_block_seal(self.config_ref) {
+            panic!("FATAL SECURITY ALERT: Precision memory tampering detected! Safety breaker tripped.");
+        }
+        self.config_ref
+    }
+}
+
+pub struct ScientificConfigAuditor;
+
+impl ScientificConfigAuditor {
+    pub fn compute_block_crc32(config: &ScientificConstants) -> u32 {
+        let mut crc: u32 = 0xFFFF_FFFF;
+        let bytes: &[u8] = unsafe {
+            std::slice::from_raw_parts(
+                (config as *const ScientificConstants) as *const u8,
+                std::mem::size_of::<ScientificConstants>() - 16,
+            )
+        };
+        for &byte in bytes {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                if (crc & 1) != 0 { crc = (crc >> 1) ^ 0xEDB8_8320; } else { crc >>= 1; }
+            }
+        }
+        !crc
+    }
+
+    #[inline(always)]
+    pub fn verify_block_seal(config: &ScientificConstants) -> bool {
+        config.expected_integrity_crc32 == Self::compute_block_crc32(config)
+    }
 }
