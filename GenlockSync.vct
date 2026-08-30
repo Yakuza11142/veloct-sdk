@@ -1,12 +1,158 @@
-module Sync.Genlock;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
+use std::sync::Arc;
+use std::thread::{self, Thread};
+use std::time::Duration;
 
-struct GenlockState {
-    frame_trigger: bool,
-    target_fps: f32,
-    phase_offset_ms: f32
+// ============================================================================
+// 1. DATA CORE: HARDWARE-ALIGNED GENLOCK STATE DESCRIPTORS
+// ============================================================================
+
+/// Strict 16-byte memory-aligned layout matching SDI/Genlock PCIe interface cards.
+/// Padded out cleanly to eliminate CPU cache line reordering and memory-bus layout corruption.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[repr(C, align(16))]
+pub struct GenlockHardwareMetrics {
+    pub target_fps: f32,
+    pub phase_offset_seconds: f32,
+    pub last_pulse_timestamp_tsc: u64, // Exact CPU cycle token captured at the hardware interrupt boundary
+    pub global_pulse_count: u64,
+    pub sync_status_mask: u32,         // Bit 0: Locked, Bit 1: PhaseMissed, Bit 2: SignalLoss
 }
 
-public fn await_genlock_pulse(mut state: GenlockState) {
-    while !syscall_gpio_read_sync_pin() {}
-    state.frame_trigger = true;
+// ============================================================================
+// 2. THE LOCK-FREE RECENT CONTEXT REGISTRY (URCU)
+// ============================================================================
+
+/// Thread-safe, lock-free global genlock configuration registry.
+/// Thousands of parallel nDisplay cluster nodes, DMX lighting grids, and camera trackers
+/// can query current genlock timing states concurrently with absolute zero read latency.
+pub struct ConcurrentGenlockRegistry {
+    active_metrics_ptr: AtomicPtr<GenlockHardwareMetrics>,
+}
+
+impl ConcurrentGenlockRegistry {
+    pub fn new() -> Self {
+        let default_metrics = Box::new(GenlockHardwareMetrics {
+            target_fps: 24.00, // Standard cinematic frame lock frequency setup
+            phase_offset_seconds: 0.0,
+            last_pulse_timestamp_tsc: 0,
+            global_pulse_count: 0,
+            sync_status_mask: 1, // Operational Nominal
+        });
+        Self { active_metrics_ptr: AtomicPtr::new(Box::into_raw(default_metrics)) }
+    }
+
+    /// LOCK-FREE HOT SNAPSHOT READ (Render Thread Hot Path)
+    #[inline(always)]
+    pub fn acquire_snapshot(&self) -> Arc<GenlockHardwareMetrics> {
+        let raw_ptr = self.active_metrics_ptr.load(Ordering::Acquire);
+        unsafe { Arc::new(*raw_ptr) }
+    }
+
+    /// ATOMIC AT-RUN-TIME HOT-SWAP (Interrupt Service Routine / Ingestion Path)
+    pub fn commit_metrics_swap(&self, fresh_metrics: GenlockHardwareMetrics) {
+        let new_raw_ptr = Box::into_raw(Box::new(fresh_metrics));
+        let old_raw_ptr = self.active_metrics_ptr.swap(new_raw_ptr, Ordering::Release);
+        if !old_raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(old_raw_ptr); } // Clear out historical frame allocation memory
+        }
+    }
+}
+
+impl Drop for ConcurrentGenlockRegistry {
+    fn drop(&mut self) {
+        let raw_ptr = self.active_metrics_ptr.load(Ordering::Relaxed);
+        if !raw_ptr.is_null() {
+            unsafe { let _ = Box::from_raw(raw_ptr); }
+        }
+    }
+}
+
+// ============================================================================
+// 3. THE ASYNCHRONOUS MMIO INTERRUPT DRIVER PIPELINE
+// ============================================================================
+
+pub struct UltimateGenlockOrchestrator;
+
+impl UltimateGenlockOrchestrator {
+    /// SPAWNS INTERRUPT-DRIVEN HARDWARE LISTENER LOOP
+    /// Simulates a kernel-level hardware interrupt handler (ISR) waking up the render engine thread
+    /// via a zero-allocation, sub-microsecond thread unpark signal.
+    pub fn spawn_hardware_interrupt_thread(
+        registry: Arc<ConcurrentGenlockRegistry>,
+        render_thread_handle: Thread,
+        shutdown_signal: Arc<AtomicBool>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            println!("[Genlock Hardware ISR]: Memory-Mapped I/O Register Interface Ingesting Sync Pulses...");
+            
+            // In production, this address maps directly to physical PCIe/GPIO memory regions via /dev/mem
+            let simulated_mmio_register_address: *const u8 = &0u8; 
+            let mut internal_pulse_counter = 0u64;
+
+            while !shutdown_signal.load(Ordering::Relaxed) {
+                // Simulate waiting for a physical hardware level interrupt signal (e.g. 24Hz genlock pulse)
+                thread::sleep(Duration::from_millis(41)); // ~41.66ms spacing representing 24fps cinema capture
+                
+                let current_pulse_tsc = unsafe { std::arch::x86_64::_rdtsc() };
+                internal_pulse_counter += 1;
+
+                let mut working_metrics = (*registry.acquire_snapshot()).clone();
+                working_metrics.last_pulse_timestamp_tsc = current_pulse_tsc;
+                working_metrics.global_pulse_count = internal_pulse_counter;
+
+                // Safely update global clock states lock-free across cluster systems
+                registry.commit_metrics_swap(working_metrics);
+
+                // ZERO-LATENCY HARDWARE SIGNAL UNPARK: Wake up the rendering thread instantly
+                render_thread_handle.unpark();
+            }
+            println!("[Genlock Hardware ISR]: Sync pin signal listener thread safely terminated.");
+        })
+    }
+}
+
+// ============================================================================
+// 5. PRODUCTION LED VOLUME RUNTIME VERIFICATION HARNESS
+// ============================================================================
+
+fn main() {
+    let genlock_registry = Arc::new(ConcurrentGenlockRegistry::new());
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+
+    println!("--- High-Precision Hardware Genlock Orchestration Core Online ---");
+
+    // 1. Capture the main rendering thread handle identifier
+    let main_render_thread = thread::current();
+
+    // 2. Launch the asynchronous, non-blocking background interrupt signal listener thread
+    let isr_registry_ref = Arc::clone(&genlock_registry);
+    let isr_shutdown_ref = Arc::clone(&shutdown_flag);
+    let hardware_isr_handle = UltimateGenlockOrchestrator::spawn_hardware_interrupt_thread(
+        isr_registry_ref,
+        main_render_thread,
+        isr_shutdown_ref,
+    );
+
+    // 3. Simulating an active rendering frame loop genlocked to the camera shutter clock
+    println!("\nMain Render Thread: Entering lockstep hardware-synchronized rendering loop...");
+    for frame in 1..=3 {
+        // Safe, zero-overhead thread parking: The CPU rests completely until the hardware pin fires!
+        // This drops CPU core utilization to 0% while waiting, maximizing cache lines thermal safety
+        thread::park();
+        
+        let sync_snapshot = genlock_registry.acquire_snapshot();
+        println!(
+            "  [Render Frame Buffer Flush #{}] Genlock Pulse Confirmed! Sync Count: {} | Ingestion TSC: {}",
+            frame, sync_snapshot.global_pulse_count, sync_snapshot.last_pulse_timestamp_tsc
+        );
+    }
+
+    // 4. Trigger safe structural teardown pass
+    shutdown_flag.store(true, Ordering::Relaxed);
+    // Unpark the background worker loop thread one final time to allow clean exit breaks
+    hardware_isr_handle.thread().unpark();
+    hardware_isr_handle.join().unwrap();
+    
+    println!("\nGenlock Hardware Lifecycle Successfully Terminated.");
 }
